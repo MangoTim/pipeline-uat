@@ -639,13 +639,6 @@ pipeline {
                     # bytes the UAT and PROD sites will pull. Everything the
                     # scans below look at is then literally the registry's
                     # copy, not the build's intermediate representation.
-                    #
-                    # The pull is also what makes the comparison meaningful:
-                    # podman keeps the OCI manifest of a locally built image,
-                    # but the registry stores the DOCKER v2s2 manifest it was
-                    # pushed as. The two describe the same image, but their
-                    # manifest digests differ, so comparing a locally built
-                    # manifest digest with the registry's would always fail.
                     podman pull --tls-verify=false ${FULL_IMAGE}
 
                     # Prove that what the client pulls from the registry is
@@ -653,37 +646,63 @@ pipeline {
                     # Aqua / Trivy in the stage below. Without this the scan
                     # evidence and the delivered artefact could in principle
                     # be different images.
-                    REG_DIGEST=$(curl -s \
-                        -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json' \
-                        -o /dev/null -D - \
-                        "http://${REGISTRY}/v2/${IMAGE_NAME}/manifests/${IMAGE_VERSION}" \
-                        | tr -d '\r' | awk '/Docker-Content-Digest/ {print $2}')
-                    PULLED_ID=$(podman image inspect ${FULL_IMAGE} --format '{{.Id}}')
-                    PULLED_DIGEST=$(podman image inspect ${FULL_IMAGE} --format '{{.Digest}}')
+                    #
+                    # Two different digests are involved and they must not be
+                    # confused with one another:
+                    #
+                    #   * the MANIFEST digest — the hash of the manifest
+                    #     document, which is what the registry serves in its
+                    #     Docker-Content-Digest header. It identifies the tag
+                    #     for humans and for the approval gate.
+                    #   * the CONFIG digest — the hash of the image config,
+                    #     which is what podman prints as the image ID. The
+                    #     config carries the diff_id of every layer, so an
+                    #     equal config digest means an equal filesystem.
+                    #
+                    # The manifest digest cannot be compared with the local
+                    # `.Digest`: podman keeps the OCI manifest of a locally
+                    # built image while the registry stores the DOCKER v2s2
+                    # manifest it was pushed as. Same image, different
+                    # manifest bytes, different digest. The config digest
+                    # has no such ambiguity, so that is what the check uses.
+                    MANIFEST_URL="http://${REGISTRY}/v2/${IMAGE_NAME}/manifests/${IMAGE_VERSION}"
+                    ACCEPT='Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json'
 
-                    echo "registry digest : ${REG_DIGEST}"
-                    echo "pulled digest   : ${PULLED_DIGEST}"
-                    echo "built image id  : ${BUILT_ID}"
-                    echo "pulled image id : ${PULLED_ID}"
+                    REG_DIGEST=$(curl -s -D - -o /dev/null -H "${ACCEPT}" "${MANIFEST_URL}" \
+                        | tr -d '\r' | awk '/Docker-Content-Digest/ {print $2}')
+
+                    # The config digest inside the manifest the registry
+                    # serves — the image ID of the image in the registry.
+                    REG_CONFIG=$(curl -s -H "${ACCEPT}" "${MANIFEST_URL}" \
+                        | python3 -c "import json,sys; m=json.load(sys.stdin); print(m.get('config',{}).get('digest','MISSING'))")
+
+                    PULLED_ID=$(podman image inspect ${FULL_IMAGE} --format '{{.Id}}')
+
+                    echo "registry manifest digest : ${REG_DIGEST}"
+                    echo "registry config digest   : ${REG_CONFIG}"
+                    echo "built image id           : ${BUILT_ID}"
+                    echo "pulled image id          : ${PULLED_ID}"
 
                     if [ -z "${REG_DIGEST}" ]; then
                         echo "BLOCKED: the registry did not return a digest for ${FULL_IMAGE}."
                         exit 1
                     fi
 
-                    if [ "${REG_DIGEST}" != "${PULLED_DIGEST}" ]; then
-                        echo "BLOCKED: registry digest (${REG_DIGEST}) does not match the pulled image digest (${PULLED_DIGEST})."
+                    if [ "${REG_CONFIG}" != "${BUILT_ID}" ]; then
+                        echo "BLOCKED: the image in the registry is not the image that was built."
+                        echo "        registry config digest = ${REG_CONFIG}"
+                        echo "        built image id         = ${BUILT_ID}"
                         exit 1
                     fi
 
                     if [ "${BUILT_ID}" != "${PULLED_ID}" ]; then
-                        echo "BLOCKED: the registry copy is not the image that was built."
+                        echo "BLOCKED: the copy pulled back from the registry is not the image that was built."
                         echo "        built  image id=${BUILT_ID}"
                         echo "        pulled image id=${PULLED_ID}"
                         exit 1
                     fi
 
-                    echo "Digest check OK: the registry copy is the image that was built and that the scans will examine."
+                    echo "Digest check OK: the registry holds the image that was built, and the copy pulled back is that same image."
 
                     # Keep the digest for the approval gate: the message the
                     # human reads has to name the exact bytes PROD would get.
