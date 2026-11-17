@@ -626,29 +626,64 @@ pipeline {
             steps {
                 sh '''
                     set -eux
+
+                    # The image as it was BUILT, before the push. The image ID
+                    # is the digest of the image config, and that config
+                    # carries the diff_id of every layer — so an equal image ID
+                    # means an equal filesystem, whatever the manifest says.
+                    BUILT_ID=$(podman image inspect ${FULL_IMAGE} --format '{{.Id}}')
+
                     podman push ${FULL_IMAGE} --tls-verify=false
 
+                    # Pull the pushed copy back, so the local store holds the
+                    # bytes the UAT and PROD sites will pull. Everything the
+                    # scans below look at is then literally the registry's
+                    # copy, not the build's intermediate representation.
+                    #
+                    # The pull is also what makes the comparison meaningful:
+                    # podman keeps the OCI manifest of a locally built image,
+                    # but the registry stores the DOCKER v2s2 manifest it was
+                    # pushed as. The two describe the same image, but their
+                    # manifest digests differ, so comparing a locally built
+                    # manifest digest with the registry's would always fail.
+                    podman pull --tls-verify=false ${FULL_IMAGE}
+
                     # Prove that what the client pulls from the registry is
-                    # byte-identical to the image that was built here and then
-                    # scanned by Aqua / Trivy in the stages below. Without this
-                    # the scan evidence and the delivered artefact could in
-                    # principle be different images.
+                    # the same image that was built here and then scanned by
+                    # Aqua / Trivy in the stage below. Without this the scan
+                    # evidence and the delivered artefact could in principle
+                    # be different images.
                     REG_DIGEST=$(curl -s \
                         -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json' \
                         -o /dev/null -D - \
                         "http://${REGISTRY}/v2/${IMAGE_NAME}/manifests/${IMAGE_VERSION}" \
                         | tr -d '\r' | awk '/Docker-Content-Digest/ {print $2}')
-                    LOCAL_DIGEST=$(podman image inspect ${FULL_IMAGE} --format '{{.Digest}}')
+                    PULLED_ID=$(podman image inspect ${FULL_IMAGE} --format '{{.Id}}')
+                    PULLED_DIGEST=$(podman image inspect ${FULL_IMAGE} --format '{{.Digest}}')
 
                     echo "registry digest : ${REG_DIGEST}"
-                    echo "local digest    : ${LOCAL_DIGEST}"
+                    echo "pulled digest   : ${PULLED_DIGEST}"
+                    echo "built image id  : ${BUILT_ID}"
+                    echo "pulled image id : ${PULLED_ID}"
 
-                    if [ -n "${REG_DIGEST}" ] && [ "${REG_DIGEST}" = "${LOCAL_DIGEST}" ]; then
-                        echo "Digest check OK: the registry copy is byte-identical to the scanned image."
-                    else
-                        echo "BLOCKED: registry digest (${REG_DIGEST}) does not match the scanned image digest (${LOCAL_DIGEST})."
+                    if [ -z "${REG_DIGEST}" ]; then
+                        echo "BLOCKED: the registry did not return a digest for ${FULL_IMAGE}."
                         exit 1
                     fi
+
+                    if [ "${REG_DIGEST}" != "${PULLED_DIGEST}" ]; then
+                        echo "BLOCKED: registry digest (${REG_DIGEST}) does not match the pulled image digest (${PULLED_DIGEST})."
+                        exit 1
+                    fi
+
+                    if [ "${BUILT_ID}" != "${PULLED_ID}" ]; then
+                        echo "BLOCKED: the registry copy is not the image that was built."
+                        echo "        built  image id=${BUILT_ID}"
+                        echo "        pulled image id=${PULLED_ID}"
+                        exit 1
+                    fi
+
+                    echo "Digest check OK: the registry copy is the image that was built and that the scans will examine."
 
                     # Keep the digest for the approval gate: the message the
                     # human reads has to name the exact bytes PROD would get.
