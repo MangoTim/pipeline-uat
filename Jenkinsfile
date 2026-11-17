@@ -82,6 +82,14 @@
 //        Host networking is what lets the scanner containers reach the
 //        registry, the Aqua Console and the npm / Trivy DB registries.
 //
+//        The agent drives the HOST's podman over that socket: the pipeline
+//        sets CONTAINER_HOST=unix:///var/run/docker.sock, so podman in the
+//        agent is a client of the host's rootful podman rather than a
+//        nested runtime. (A nested runtime cannot work here — the agent's
+//        rootfs is overlayfs and its cgroup tree is read-only. The whole
+//        reason for this is spelled out in the environment block.)
+//        Host prerequisite:  systemctl enable --now podman.socket
+//
 //   6. Script approval (FIRST BUILD ONLY)
 //        The Aqua scanner CLI and Trivy run as `podman run` shell steps — no
 //        sandboxed Groovy APIs are used, so no signatures need approving.
@@ -304,6 +312,55 @@ pipeline {
         TRIVY_IMAGE   = 'docker.io/aquasec/trivy:0.76.1'
         AQUA_CREDS_ID = 'aqua-console'
 
+        // ------------------------------------------------------------------
+        // The container runtime the pipeline drives.
+        //
+        // The Jenkins agent runs INSIDE a container (jenkins-with-podman) and
+        // the host's podman socket is bind-mounted into it at
+        // /var/run/docker.sock. CONTAINER_HOST points podman at that socket,
+        // so the podman CLIENT in the agent talks to the HOST's rootful
+        // podman instead of trying to run a nested runtime of its own.
+        //
+        // A nested runtime cannot work in this agent, and the failures are
+        // confusing rather than obvious:
+        //
+        //   * the agent's own rootfs is overlayfs, so a nested overlay
+        //     graphdriver refuses to start:
+        //       "'overlay' is not supported over overlayfs, a mount_program
+        //        is required"
+        //   * the agent has no writable cgroup tree, so the nested runtime
+        //     cannot create its own:
+        //       "crun: creating cgroup directory
+        //        /sys/fs/cgroup/cpu,cpuacct/libpod_parent/...: read-only file
+        //        system"
+        //
+        // Driving the host's podman is also the RIGHT semantics, not just a
+        // workaround: the image is built, pushed, scanned and booted on the
+        // CI host, and the scan containers reach that same image store
+        // through the same socket. Everything the pipeline builds lives in
+        // ONE store, on ONE host.
+        //
+        // Two consequences for bind mounts, because the HOST resolves them:
+        //
+        //   * A path that only exists inside the agent (e.g. ${WORKSPACE})
+        //     does not exist on the host. The workspace is mounted into the
+        //     agent from the jenkins_data volume, so the scans mount the
+        //     app directory by its path inside that volume.
+        //   * The podman socket on the host is /run/podman/podman.sock —
+        //     /var/run/docker.sock is the name it is given INSIDE the
+        //     agent, and the host has no such file.
+        //
+        // Host prerequisite: `systemctl enable --now podman.socket` (the
+        // socket must be there when the build runs).
+        // ------------------------------------------------------------------
+        CONTAINER_HOST = 'unix:///var/run/docker.sock'
+        PODMAN_SOCK    = '/run/podman/podman.sock'
+
+        // Where the jenkins_data volume lives ON THE HOST. The app source is
+        // cloned into ${WORKSPACE}/app, i.e. into that volume, so this is the
+        // host-side path of the same directory the scans have to read.
+        JENKINS_VOLUME_PATH = '/var/lib/containers/storage/volumes/jenkins_data/_data'
+
         // 8093 is the live production port (container "hku-intranet"); the
         // verify container uses 8094 so it cannot collide with it.
         VERIFY_PORT   = '8094'
@@ -450,7 +507,7 @@ pipeline {
                         --network host --security-opt label=disable \
                         -v trivy-cache:/root/.cache/trivy \
                         -e TRIVY_DB_REPOSITORY=docker.io/aquasec/trivy-db:2 \
-                        -v ${WORKSPACE}/app:/src \
+                        -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/src:ro \
                         ${TRIVY_IMAGE} \
                         fs --scanners secret \
                             --exit-code 1 \
@@ -468,11 +525,18 @@ pipeline {
                     #    into a throwaway bun container and the audit runs
                     #    there. Root workspace first, then server/ (it has its
                     #    own lockfile).
+                    #
+                    #    The mount is READ-WRITE on purpose: bun opens
+                    #    package.json for writing while it resolves the
+                    #    project, so a read-only mount fails with
+                    #    "Unexpected: could not open /app/package.json" —
+                    #    a scan failure, not a finding. Nothing is written:
+                    #    the directory is identical before and after.
                     # ------------------------------------------------------------------
                     BUN_RC=0
                     podman run --rm --name hku-audit-fs-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
-                        -v ${WORKSPACE}/app:/app \
+                        -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/app \
                         --entrypoint sh -w /app oven/bun:1.3-alpine \
                         -c '
                             rc=0
@@ -621,7 +685,7 @@ pipeline {
                         podman run --rm --name aqua-scan-${BUILD_NUMBER} \
                             --network host \
                             --security-opt label=disable --user root \
-                            -v /var/run/docker.sock:/var/run/docker.sock \
+                            -v ${PODMAN_SOCK}:/var/run/docker.sock \
                             ${SCANNER_IMAGE} \
                             scan \
                                 --host ${AQUA_HOST} \
@@ -686,7 +750,7 @@ pipeline {
                         podman run --rm --name aqua-scan-reg-${BUILD_NUMBER} \
                             --network host \
                             --security-opt label=disable --user root \
-                            -v /var/run/docker.sock:/var/run/docker.sock \
+                            -v ${PODMAN_SOCK}:/var/run/docker.sock \
                             ${SCANNER_IMAGE} \
                             scan \
                                 --host ${AQUA_HOST} \
@@ -722,14 +786,18 @@ pipeline {
 
                     # The docker socket is REQUIRED: Trivy resolves the target
                     # image through a container runtime API, and without the
-                    # socket it can only reach a remote registry. On this host
-                    # /var/run/docker.sock is a symlink to
-                    # /run/podman/podman.sock, so the same mount works for
-                    # both the Aqua scanner and Trivy.
+                    # socket it can only reach a remote registry.
+                    #
+                    # ${PODMAN_SOCK} is the socket on the HOST, because podman
+                    # runs on the host (see CONTAINER_HOST in the environment
+                    # block) and the host resolves every bind mount. Inside
+                    # the container it is still called /var/run/docker.sock —
+                    # that is the name Trivy and the Aqua scanner look for.
+                    # The same mount works for both of them.
                     TRIVY_RC=0
                     podman run --rm --name hku-trivy-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
-                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v ${PODMAN_SOCK}:/var/run/docker.sock \
                         -v trivy-cache:/root/.cache/trivy \
                         -e TRIVY_DB_REPOSITORY=docker.io/aquasec/trivy-db:2 \
                         ${TRIVY_IMAGE} \
@@ -755,7 +823,7 @@ pipeline {
                     TRIVY_OS_RC=0
                     podman run --rm --name hku-trivy-os-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
-                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v ${PODMAN_SOCK}:/var/run/docker.sock \
                         -v trivy-cache:/root/.cache/trivy \
                         -e TRIVY_DB_REPOSITORY=docker.io/aquasec/trivy-db:2 \
                         ${TRIVY_IMAGE} \
@@ -773,7 +841,7 @@ pipeline {
                     # they belong in the artifact that goes to the client.
                     podman run --rm --name hku-trivy-os-high-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
-                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v ${PODMAN_SOCK}:/var/run/docker.sock \
                         -v trivy-cache:/root/.cache/trivy \
                         -e TRIVY_DB_REPOSITORY=docker.io/aquasec/trivy-db:2 \
                         ${TRIVY_IMAGE} \
