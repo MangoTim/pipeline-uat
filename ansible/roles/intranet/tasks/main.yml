@@ -1,0 +1,251 @@
+---
+# Deploy the HKU ENGG Intranet onto one site (UAT or PROD).
+#
+# Design notes — the same house rules as the RHEL MCP pipeline:
+#   * No `become` anywhere. The site is driven as its own non-root user
+#     (`rhai`) with rootless podman, so no sudo password is ever needed and
+#     the deploy user does not need to be in the wheel group.
+#   * The container runs from a systemd USER unit, so it starts on boot and is
+#     supervised, but nothing needs root to manage it.
+#   * The image is PULLED from the registry, not copied as a tarball: the
+#     pipeline already pushed exactly this tag there, and the push stage
+#     proved the registry copy is byte-identical to the scanned image.
+#   * The environment file stays on the host. Jenkins never sees the client
+#     secret or the cookie secret — it only chooses the image, and the site
+#     already knows which port and which database it serves.
+
+- name: The user systemd runtime directory
+  ansible.builtin.set_fact:
+    intranet_xdg_runtime_dir: "/run/user/{{ ansible_user_uid | default(1001) }}"
+
+# ----- The environment file ------------------------------------------------
+# This is the one thing that must never be papered over: the application
+# refuses to start in production mode without SSO_COOKIE_SECRET, so a missing
+# env file has to fail the deployment loudly instead of leaving a dead
+# container behind.
+
+- name: Look for the source environment file
+  ansible.builtin.stat:
+    path: "{{ intranet_env_source }}"
+  register: intranet_env_source_stat
+
+- name: Fail with a clear message when the environment file is missing
+  ansible.builtin.fail:
+    msg: >-
+      Environment file {{ intranet_env_source }} does not exist on
+      {{ inventory_hostname }}. It holds the database credentials, the Entra
+      client secret and the SSO cookie secret, so it must be created on the
+      host by hand — see the RUNBOOK, Section 4.2. It is never sent from
+      Jenkins.
+  when: not intranet_env_source_stat.stat.exists
+
+- name: Look for this site's environment file
+  ansible.builtin.stat:
+    path: "{{ intranet_env_file }}"
+  register: intranet_env_target_stat
+
+# For PROD the site's env file IS the source file, so there is nothing to
+# derive. For UAT the role derives it from the file that lives ON THE UAT
+# HOST, rewriting only PORT and DB_NAME. Everything else stays that site's own
+# — in particular the database role and its password, which are UAT's own
+# (engg_uat), so the UAT container never holds a credential that can open the
+# PROD database. The UAT source file is NOT a copy of the PROD one.
+- name: Derive this site's environment file from the source file
+  ansible.builtin.shell: |
+    set -eu
+    tmp="{{ intranet_env_file }}.tmp"
+    sed -e 's|^PORT=.*|PORT={{ intranet_port }}|' \
+        -e 's|^DB_NAME=.*|DB_NAME={{ intranet_db_name }}|' \
+        "{{ intranet_env_source }}" > "$tmp"
+    grep -q '^PORT=' "$tmp"   || echo "PORT={{ intranet_port }}"   >> "$tmp"
+    grep -q '^DB_NAME=' "$tmp" || echo "DB_NAME={{ intranet_db_name }}" >> "$tmp"
+    mv "$tmp" "{{ intranet_env_file }}"
+    chmod 0600 "{{ intranet_env_file }}"
+  args:
+    executable: /bin/bash
+  when:
+    - intranet_env_file != intranet_env_source
+    - not intranet_env_target_stat.stat.exists
+  no_log: true
+
+- name: Confirm this site's environment file is present
+  ansible.builtin.stat:
+    path: "{{ intranet_env_file }}"
+  register: intranet_env_final_stat
+
+- name: Fail with a clear message when this site's environment file is missing
+  ansible.builtin.fail:
+    msg: >-
+      Environment file {{ intranet_env_file }} does not exist on
+      {{ inventory_hostname }}. The deployment stops here rather than starting
+      a container that cannot read its configuration.
+  when: not intranet_env_final_stat.stat.exists
+
+# ----- The backups directory ------------------------------------------------
+
+- name: Ensure the backups directory exists
+  ansible.builtin.file:
+    path: "{{ intranet_backups_dir }}"
+    state: directory
+    mode: "0777"
+  # The container runs as uid 1000 (`bun`). Under rootless podman that uid is
+  # mapped into a subuid range, so the host directory has to be writable by
+  # anyone — the RUNBOOK sanctions this for rootless installs (Section 4.4).
+
+# ----- The image ------------------------------------------------------------
+
+- name: Pull the image from the registry
+  ansible.builtin.command:
+    cmd: >-
+      podman pull --tls-verify={{ intranet_registry_tls_verify }}
+      {{ intranet_image }}
+  environment:
+    XDG_RUNTIME_DIR: "{{ intranet_xdg_runtime_dir }}"
+  register: intranet_pull
+  changed_when: "'Downloaded' in intranet_pull.stdout or 'Copying blob' in intranet_pull.stdout"
+
+# ----- The service ----------------------------------------------------------
+
+- name: Ensure the systemd user unit directory exists
+  ansible.builtin.file:
+    path: "{{ ansible_user_dir }}/.config/systemd/user"
+    state: directory
+    mode: "0755"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+
+- name: Install the systemd user unit
+  ansible.builtin.template:
+    src: intranet.service.j2
+    dest: "{{ ansible_user_dir }}/.config/systemd/user/{{ intranet_service_name }}"
+    mode: "0644"
+
+- name: Reload the user systemd manager
+  ansible.builtin.command:
+    cmd: systemctl --user daemon-reload
+  environment:
+    XDG_RUNTIME_DIR: "{{ intranet_xdg_runtime_dir }}"
+  changed_when: false
+
+- name: Enable the service
+  ansible.builtin.command:
+    cmd: systemctl --user enable {{ intranet_service_name }}
+  environment:
+    XDG_RUNTIME_DIR: "{{ intranet_xdg_runtime_dir }}"
+  changed_when: false
+
+# A `restart`, not `enable --now`: `enable --now` is a NO-OP when the unit is
+# already active, so the container would keep running the PREVIOUS image even
+# though the new one was just pulled.
+- name: Restart the service
+  ansible.builtin.command:
+    cmd: systemctl --user restart {{ intranet_service_name }}
+  environment:
+    XDG_RUNTIME_DIR: "{{ intranet_xdg_runtime_dir }}"
+  register: intranet_service_start
+  changed_when: true
+
+- name: Wait for the application to accept connections
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ intranet_port }}"
+    timeout: "{{ intranet_readiness_seconds }}"
+    state: started
+
+# ----- Verification ---------------------------------------------------------
+
+- name: Check liveness
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ intranet_port }}/health"
+    status_code: 200
+    return_content: true
+  register: intranet_health
+  retries: 12
+  delay: 5
+  until: intranet_health.status == 200
+
+- name: Check readiness
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ intranet_port }}/health/ready"
+    status_code: 200
+    return_content: true
+  register: intranet_ready
+  retries: 12
+  delay: 5
+  until: intranet_ready.status == 200
+
+# The readiness endpoint reports the database it is ACTUALLY connected to, so
+# this is what proves the UAT site is a separate data set and not a second
+# view of production.
+- name: Assert the site is talking to the expected database
+  ansible.builtin.assert:
+    that:
+      - intranet_ready.json.database == intranet_db_name
+    fail_msg: >-
+      {{ inventory_hostname }} is serving database
+      "{{ intranet_ready.json.database }}" but this site is configured for
+      "{{ intranet_db_name }}". Refusing to report a successful deployment.
+
+- name: Read the image the running container was started from
+  ansible.builtin.command:
+    cmd: >-
+      podman inspect --format '{% raw %}{{.ImageName}}{% endraw %}'
+      {{ intranet_container_name }}
+  environment:
+    XDG_RUNTIME_DIR: "{{ intranet_xdg_runtime_dir }}"
+  register: intranet_running_image
+  changed_when: false
+
+- name: Assert the running container is the promoted image
+  ansible.builtin.assert:
+    that:
+      - intranet_running_image.stdout.strip() == intranet_image
+    fail_msg: >-
+      The container is running "{{ intranet_running_image.stdout.strip() }}" but
+      "{{ intranet_image }}" was deployed.
+
+# ----- Housekeeping ---------------------------------------------------------
+
+- name: List the application images on the site
+  # The Go template placeholders are wrapped in {% raw %} so Ansible's own
+  # templating does not try to resolve "{{.Repository}}" as a variable.
+  ansible.builtin.command:
+    cmd: >-
+      podman images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}'
+  environment:
+    XDG_RUNTIME_DIR: "{{ intranet_xdg_runtime_dir }}"
+  register: intranet_local_images
+  changed_when: false
+
+- name: Remove the superseded images
+  # Only the image this deployment just rolled out is kept. Without this, a
+  # site that is deployed many times accumulates one image per build.
+  # The old image can only be removed once the container using it is gone,
+  # which is why this runs after the restart above.
+  ansible.builtin.command:
+    cmd: podman rmi {{ item }}
+  environment:
+    XDG_RUNTIME_DIR: "{{ intranet_xdg_runtime_dir }}"
+  loop: >-
+    {{ intranet_local_images.stdout_lines
+       | difference([intranet_image])
+       | select('search', '^' ~ intranet_image_repo ~ '[:\-]')
+       | list }}
+  loop_control:
+    label: "{{ item }}"
+  # rmi refuses to remove an image that a running container still uses; that
+  # is the safe outcome, not an error.
+  failed_when: false
+  changed_when: "'Deleted:' in (item.stdout | default(''))"
+
+# ----- Report ---------------------------------------------------------------
+
+- name: Report what was deployed
+  ansible.builtin.debug:
+    msg:
+      - "site          : {{ intranet_role }} ({{ inventory_hostname }})"
+      - "image         : {{ intranet_image }}"
+      - "running image : {{ intranet_running_image.stdout | default('unknown') }}"
+      - "url           : http://{{ ansible_host | default(inventory_hostname) }}:{{ intranet_port }}/"
+      - "database      : {{ intranet_db_name }}"
+      - "env file      : {{ intranet_env_file }}"

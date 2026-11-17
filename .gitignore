@@ -1,0 +1,20 @@
+# The application source is cloned at build time into ${WORKSPACE}/app by
+# the 'Fetch App Source' stage, from MangoTim/hku-calendar. It is pinned by
+# commit in the Jenkinsfile and never vendored here.
+app/
+
+# The version file belongs to the APPLICATION repository, not to the
+# pipeline. The pipeline reads app/VERSION at run time.
+VERSION
+
+# Ansible's retry files and the local ansible.cfg overrides.
+*.retry
+ansible/hosts
+ansible/.vault_pass
+
+# Local scratch.
+*.log
+*.tar.gz
+*.tar.gz.sha256
+__pycache__/
+.DS_Store

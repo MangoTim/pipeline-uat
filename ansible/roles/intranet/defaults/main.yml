@@ -1,0 +1,60 @@
+---
+# Defaults for the HKU ENGG Intranet role.
+#
+# Every one of these is overridden by the inventory, because UAT and PROD live
+# on the same host and differ only in these values. The defaults here are the
+# PROD shape, so the role is runnable without an inventory override.
+
+# The image reference as built and scanned by the pipeline, e.g.
+# -e intranet_image=192.168.147.104:8082/hku-intranet:v1.1.28102612.
+#
+# The site pulls this from the registry, so the tag the pipeline pushed is the
+# tag the site runs. Nothing is rebuilt on the way.
+intranet_image: "192.168.147.104:8082/hku-intranet:latest"
+
+# The registry is plain HTTP (no TLS), so the pull must not try to verify a
+# certificate. This is the same flag the pipeline's `podman push` uses.
+intranet_registry_tls_verify: "false"
+
+# Which site is this? Used for the unit description and the report.
+intranet_role: "PROD"
+
+# The port the application is served on. It is read from the environment file;
+# this value is used for the readiness check and the report.
+intranet_port: 8093
+
+# The database the application talks to. Also from the environment file. The
+# readiness endpoint reports the database name it is actually connected to, so
+# the pipeline asserts this value — that is how UAT is proven to be a separate
+# data set and not a second view of production.
+intranet_db_name: "engg_intranet"
+
+# Container / service naming.
+intranet_container_name: hku-intranet
+intranet_service_name: hku-intranet.service
+
+# The environment file: HOST, PORT, NODE_ENV, DB_*, AZURE_*, SSO_* — the full
+# list is in the RUNBOOK, Section 4.2. It holds the client secret and the
+# cookie secret, so it stays on the host at mode 0600 and NEVER travels to
+# Jenkins.
+intranet_env_file: "/home/rhai/hku-intranet/hku-intranet.env"
+
+# The file the environment file is derived from. For PROD this is the same
+# file (nothing to derive). For UAT it is the UAT site's OWN source file on
+# the UAT host: the role copies it and rewrites PORT and DB_NAME only, so the
+# UAT database role and its password stay UAT's own and never travel between
+# the two sites.
+intranet_env_source: "{{ intranet_env_file }}"
+
+# Where the database dumps and browser-state snapshots are written. The
+# container runs as uid 1000 (`bun`), and rootless podman maps that to a
+# subuid, so the host directory has to be world-writable — the RUNBOOK
+# sanctions this for rootless installs (Section 4.4).
+intranet_backups_dir: "/home/rhai/hku-intranet/backups"
+
+# The image the site must KEEP. The repository it belongs to, so every
+# superseded image of the same application can be removed after the rollout.
+intranet_image_repo: "192.168.147.104:8082/hku-intranet"
+
+# Readiness.
+intranet_readiness_seconds: 90

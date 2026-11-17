@@ -1,0 +1,28 @@
+---
+# Deploy the HKU ENGG Intranet to ONE site (UAT or PROD).
+#
+# The SAME image — the one the pipeline built, pushed and scanned — is deployed
+# to both sites. The tag never changes between them, so the approval gate
+# decides WHETHER a byte-identical artifact goes to production, never WHICH
+# artifact that is.
+#
+# The target is chosen by the caller:
+#
+#   ansible-playbook -i inventory.ini deploy.yml \
+#       -e intranet_target=intranet_uat \
+#       -e intranet_image=192.168.147.104:8082/hku-intranet:v1.1.28102612
+#
+#   ansible-playbook -i inventory.ini deploy.yml \
+#       -e intranet_target=intranet_prod \
+#       -e intranet_image=192.168.147.104:8082/hku-intranet:v1.1.28102612
+#
+# The role never uses `become`. Each site is driven as its own non-root user
+# with rootless podman and a systemd USER unit, so no sudo password is needed
+# and the deploy user does not need to be in the wheel group.
+
+- name: Deploy the HKU ENGG Intranet to the requested site
+  hosts: "{{ intranet_target }}"
+  gather_facts: true
+  become: false
+  roles:
+    - role: intranet

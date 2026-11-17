@@ -1,0 +1,7 @@
+# The pipeline ships shell scripts and a Jenkinsfile that are executed on a
+# Linux host, so the line endings must be LF everywhere — including in a
+# checkout on Windows, where the repository is edited.
+* text=auto eol=lf
+
+# The images are binary.
+*.png binary
