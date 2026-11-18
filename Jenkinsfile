@@ -441,10 +441,16 @@ pipeline {
         // into ${WORKSPACE}/app, and everything after that — the version, the
         // scans, the build — works on that copy.
         //
-        // APP_REF pins the exact commit the pipeline builds. Move it forward
-        // deliberately: that is the record of what was promoted to PROD.
+        // APP_REF pins the exact commit the pipeline builds. It must be a TAG
+        // (v1.1.0) or a full commit SHA — never a branch name. A branch moves
+        // under you, and "the artefact is exactly the commit named here" would
+        // be a lie. The 'Fetch App Source' stage refuses to run if this is a
+        // branch, so the pin cannot be lost by accident.
+        //
+        // Move it forward deliberately: that is the record of what was
+        // promoted to PROD.
         APP_REPO = 'https://github.com/MangoTim/hku-calendar.git'
-        APP_REF  = 'main'
+        APP_REF  = 'v1.1.0'
 
         // The controller's SSH key for Ansible. The path is relative to the
         // CONTROLLER's home, so the same inventory works from the Jenkins
@@ -466,6 +472,19 @@ pipeline {
         disableConcurrentBuilds()
     }
 
+    triggers {
+        // The GitHub plugin's push trigger: when the APPLICATION repository
+        // receives a push, GitHub delivers a webhook to Jenkins and this
+        // pipeline starts. The trigger only LISTENS — the hook on the GitHub
+        // side has to be created as well, pointing at this Jenkins' webhook
+        // endpoint.
+        //
+        // This needs a GitHub server to be configured in Jenkins first
+        // (Manage Jenkins -> System -> GitHub). Without one the delivery is
+        // rejected and the pipeline still has to be started from the UI.
+        githubPush()
+    }
+
     stages {
 
         stage('Checkout') {
@@ -484,12 +503,35 @@ pipeline {
             // this point (the version, the scans, the build) works on that
             // copy, and the artefact is exactly the commit that is named
             // here.
+            //
+            // A tag or a SHA is fetched by REF, not by branch: `git clone
+            // --branch` only understands branches and tags, and cannot take a
+            // commit SHA at all. So the clone is done in three moves — init,
+            // fetch the one ref we want, check it out — which works for a tag
+            // and for a SHA the same way.
             steps {
                 sh '''
                     set -eux
                     rm -rf app
-                    git clone --depth 1 --branch ${APP_REF} ${APP_REPO} app
+                    mkdir app
                     cd app
+                    git init -q
+                    git remote add origin ${APP_REPO}
+
+                    # A branch name would make the build non-reproducible: the
+                    # same Jenkinsfile could produce two different artefacts on
+                    # two different days. Refuse it here rather than shipping
+                    # whatever the branch happens to point at today.
+                    if git ls-remote --heads origin ${APP_REF} | grep -q .; then
+                        echo "BLOCKED: APP_REF '${APP_REF}' is a BRANCH."
+                        echo "         APP_REF must be a release tag (v1.1.0) or a"
+                        echo "         full commit SHA, so the build is reproducible."
+                        exit 1
+                    fi
+
+                    git fetch --depth 1 origin ${APP_REF}
+                    git checkout -q FETCH_HEAD
+
                     git rev-parse HEAD
                     echo "App commit: $(git rev-parse HEAD)"
                     ls -1
@@ -497,6 +539,7 @@ pipeline {
                 script {
                     env.APP_COMMIT = sh(script: 'cd app && git rev-parse HEAD', returnStdout: true).trim()
                     echo "App commit : ${env.APP_COMMIT}"
+                    echo "App ref    : ${APP_REF}"
                 }
             }
         }
