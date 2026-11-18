@@ -82,15 +82,39 @@
   when: not intranet_env_final_stat.stat.exists
 
 # ----- The backups directory ------------------------------------------------
+#
+# The container runs as uid 1000 (`bun`). Under rootless podman that uid is
+# mapped into a subuid range — on this host `rhai` owns 165536:65536, so the
+# container's uid 1000 is host uid 166535 — and the host directory has to be
+# writable by anyone, because the RUNBOOK sanctions 0777 for rootless
+# installs (Section 4.4).
+#
+# But the directory is usually created BY the container, which then owns it as
+# the mapped uid. The deploy user does not own it and cannot chmod it, and
+# this role never runs as root, so it cannot take it either — `file` would
+# fail with EPERM. That state is already correct: the container owns its own
+# backups and can write them. So the mode is only forced on a directory the
+# deploy user owns, and one the container owns is left alone.
 
-- name: Ensure the backups directory exists
+- name: Look at the backups directory
+  ansible.builtin.stat:
+    path: "{{ intranet_backups_dir }}"
+  register: intranet_backups_stat
+
+- name: Create the backups directory
   ansible.builtin.file:
     path: "{{ intranet_backups_dir }}"
     state: directory
     mode: "0777"
-  # The container runs as uid 1000 (`bun`). Under rootless podman that uid is
-  # mapped into a subuid range, so the host directory has to be writable by
-  # anyone — the RUNBOOK sanctions this for rootless installs (Section 4.4).
+  when: not intranet_backups_stat.stat.exists
+
+- name: Make the backups directory writable by the container
+  ansible.builtin.file:
+    path: "{{ intranet_backups_dir }}"
+    mode: "0777"
+  when:
+    - intranet_backups_stat.stat.exists
+    - intranet_backups_stat.stat.uid == (ansible_user_uid | default(1001))
 
 # ----- The image ------------------------------------------------------------
 
