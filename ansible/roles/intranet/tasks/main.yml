@@ -164,27 +164,37 @@
   delay: 5
   until: intranet_health.status == 200
 
+# The application's own readiness answer. It reports WHICH database it is
+# connected to and whether that database answers — a live probe, not a static
+# flag. There is no separate /health/ready endpoint: the SPA catch-all would
+# answer that path with the index page, so the check has to ask the API.
 - name: Check readiness
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ intranet_port }}/health/ready"
+    url: "http://127.0.0.1:{{ intranet_port }}/api/db/connection"
     status_code: 200
     return_content: true
   register: intranet_ready
   retries: 12
   delay: 5
-  until: intranet_ready.status == 200
+  until:
+    - intranet_ready.status | default(0) == 200
+    - (intranet_ready.json | default({})).get('isReachable', false) | bool
 
-# The readiness endpoint reports the database it is ACTUALLY connected to, so
-# this is what proves the UAT site is a separate data set and not a second
+# The readiness answer reports the database the site is ACTUALLY connected to,
+# so this is what proves the UAT site is a separate data set and not a second
 # view of production.
 - name: Assert the site is talking to the expected database
   ansible.builtin.assert:
     that:
-      - intranet_ready.json.database == intranet_db_name
+      - (intranet_ready.json | default({})).get('databaseName') == intranet_db_name
+      - (intranet_ready.json | default({})).get('isReachable', false) | bool
     fail_msg: >-
       {{ inventory_hostname }} is serving database
-      "{{ intranet_ready.json.database }}" but this site is configured for
-      "{{ intranet_db_name }}". Refusing to report a successful deployment.
+      "{{ (intranet_ready.json | default({})).get('databaseName', 'unknown') }}"
+      and reports it as
+      {{ 'reachable' if ((intranet_ready.json | default({})).get('isReachable', false) | bool) else 'NOT reachable' }},
+      but this site is configured for "{{ intranet_db_name }}". Refusing to
+      report a successful deployment.
 
 - name: Read the image the running container was started from
   ansible.builtin.command:

@@ -365,6 +365,14 @@ pipeline {
         // verify container uses 8094 so it cannot collide with it.
         VERIFY_PORT   = '8094'
 
+        // The throwaway PostgreSQL the verify stage boots on the CI host.
+        // The application initialises its schema at boot and refuses to start
+        // when the database is unreachable, so the CI cannot verify the image
+        // against a closed port — it needs a real database. This one is a
+        // container of its own, on a port of its own, with a database of its
+        // own: no UAT or PROD data is touched, and it is removed afterwards.
+        VERIFY_DB_PORT = '55432'
+
         // The two deployment sites — TWO HOSTS, not two containers on one:
         //   UAT   192.168.147.104  (the intranet container)         user uat
         //   PROD  192.168.147.105  (the live site)                  user rhai
@@ -631,7 +639,13 @@ pipeline {
                     # is the digest of the image config, and that config
                     # carries the diff_id of every layer — so an equal image ID
                     # means an equal filesystem, whatever the manifest says.
+                    #
+                    # podman prints the image ID as the bare hex, without the
+                    # "sha256:" prefix the registry uses. The prefix is put
+                    # back on here so that all three digests below can be
+                    # compared as they are written in the registry.
                     BUILT_ID=$(podman image inspect ${FULL_IMAGE} --format '{{.Id}}')
+                    BUILT_CONFIG="sha256:${BUILT_ID#sha256:}"
 
                     podman push ${FULL_IMAGE} --tls-verify=false
 
@@ -677,28 +691,29 @@ pipeline {
                         | python3 -c "import json,sys; m=json.load(sys.stdin); print(m.get('config',{}).get('digest','MISSING'))")
 
                     PULLED_ID=$(podman image inspect ${FULL_IMAGE} --format '{{.Id}}')
+                    PULLED_CONFIG="sha256:${PULLED_ID#sha256:}"
 
                     echo "registry manifest digest : ${REG_DIGEST}"
                     echo "registry config digest   : ${REG_CONFIG}"
-                    echo "built image id           : ${BUILT_ID}"
-                    echo "pulled image id          : ${PULLED_ID}"
+                    echo "built config digest      : ${BUILT_CONFIG}"
+                    echo "pulled config digest     : ${PULLED_CONFIG}"
 
                     if [ -z "${REG_DIGEST}" ]; then
                         echo "BLOCKED: the registry did not return a digest for ${FULL_IMAGE}."
                         exit 1
                     fi
 
-                    if [ "${REG_CONFIG}" != "${BUILT_ID}" ]; then
+                    if [ "${REG_CONFIG}" != "${BUILT_CONFIG}" ]; then
                         echo "BLOCKED: the image in the registry is not the image that was built."
                         echo "        registry config digest = ${REG_CONFIG}"
-                        echo "        built image id         = ${BUILT_ID}"
+                        echo "        built config digest    = ${BUILT_CONFIG}"
                         exit 1
                     fi
 
-                    if [ "${BUILT_ID}" != "${PULLED_ID}" ]; then
+                    if [ "${BUILT_CONFIG}" != "${PULLED_CONFIG}" ]; then
                         echo "BLOCKED: the copy pulled back from the registry is not the image that was built."
-                        echo "        built  image id=${BUILT_ID}"
-                        echo "        pulled image id=${PULLED_ID}"
+                        echo "        built  config digest = ${BUILT_CONFIG}"
+                        echo "        pulled config digest = ${PULLED_CONFIG}"
                         exit 1
                     fi
 
@@ -927,28 +942,69 @@ pipeline {
         }
 
         stage('Deploy & Verify') {
-            // CI/CD proof: spin up the scanned image on a spare port, hit the
-            // health endpoint and the SPA root, and fail the build if either
-            // is missing. Cleans the container up afterwards.
+            // CI/CD proof: boot the scanned image on a spare port, hit the
+            // health endpoint, the database connection endpoint and the SPA
+            // root, and fail the build if any of them is missing. Cleans both
+            // containers up afterwards.
+            //
+            // The application initialises its schema at boot — `await initDb()`
+            // is not guarded — so it REFUSES TO START when the database is
+            // unreachable. The CI therefore cannot point it at a closed port
+            // to prove a "degraded" start: it needs a real database. The
+            // throwaway one is a PostgreSQL container on the CI host, on a
+            // port of its own, with a database of its own. No UAT or PROD data
+            // is touched, and it is removed again at the end of the stage.
             //
             // The image no longer carries a default DB_HOST / DB_USER, and in
             // production mode it refuses to boot without SSO_COOKIE_SECRET —
-            // so the verify container gets throwaway values for both. The DB
-            // points at a closed port on purpose: the CI host has no
-            // PostgreSQL, and pointing at a refused connection proves the
-            // degraded-start path (liveness up, readiness 503) works.
+            // so the verify container gets throwaway values for both.
             steps {
                 sh '''
                     set -eux
-                    podman run -d --name hku-intranet-verify-${BUILD_NUMBER} \
+
+                    # ----- the throwaway database ---------------------------------------
+                    # --replace: a container left behind by a FAILED build would
+                    # still own port 55432, and the next build would then fail
+                    # with "address already in use". --replace removes the
+                    # leftover first, so the stage is repeatable.
+                    podman run -d --replace --name hku-verify-db-${BUILD_NUMBER} \
+                        --network host \
+                        -e POSTGRES_USER=verify \
+                        -e POSTGRES_PASSWORD=verify \
+                        -e POSTGRES_DB=engg_intranet_verify \
+                        docker.io/library/postgres:14-alpine \
+                        postgres -p ${VERIFY_DB_PORT}
+
+                    # pg_isready is called by its absolute path: the postgres
+                    # image keeps the server binaries in /usr/local/bin, which
+                    # is on the image's PATH but is NOT what `podman exec`
+                    # resolves a bare command name against.
+                    for i in $(seq 1 30); do
+                        if podman exec hku-verify-db-${BUILD_NUMBER} \
+                             /usr/local/bin/pg_isready -h 127.0.0.1 -p ${VERIFY_DB_PORT} \
+                             -U verify -d engg_intranet_verify > /dev/null 2>&1; then
+                            break
+                        fi
+                        sleep 2
+                    done
+                    podman exec hku-verify-db-${BUILD_NUMBER} \
+                        /usr/local/bin/pg_isready -h 127.0.0.1 -p ${VERIFY_DB_PORT} \
+                        -U verify -d engg_intranet_verify \
+                        || { echo "BLOCKED: the throwaway database did not start"; \
+                             podman logs hku-verify-db-${BUILD_NUMBER} || true; \
+                             exit 1; }
+
+                    # ----- the application under test ------------------------------------
+                    podman run -d --replace --name hku-intranet-verify-${BUILD_NUMBER} \
                         --network host \
                         -e HOST=127.0.0.1 \
                         -e PORT=${VERIFY_PORT} \
                         -e SSO_COOKIE_SECRET=ci-throwaway-secret-not-used-anywhere \
                         -e DB_HOST=127.0.0.1 \
-                        -e DB_PORT=1 \
-                        -e DB_USER=ci_throwaway \
-                        -e DB_NAME=engg_intranet \
+                        -e DB_PORT=${VERIFY_DB_PORT} \
+                        -e DB_USER=verify \
+                        -e DB_PASSWORD=verify \
+                        -e DB_NAME=engg_intranet_verify \
                         ${FULL_IMAGE}
 
                     # Wait for the API to finish initDb() and start listening.
@@ -969,24 +1025,34 @@ pipeline {
                              podman logs hku-intranet-verify-${BUILD_NUMBER} || true; \
                              exit 1; }
 
-                    # Readiness must report the database as down (503 degraded)
-                    # rather than the container pretending to be healthy. This
-                    # is what an orchestrator readiness probe keys off.
-                    READY_CODE=$(curl -s -o /tmp/hku-ready.json -w '%{http_code}' \
-                        "http://127.0.0.1:${VERIFY_PORT}/health/ready" || true)
-                    cat /tmp/hku-ready.json || true
-                    echo ""
-                    [ "${READY_CODE}" = "503" ] \
-                        || { echo "BLOCKED: /health/ready returned ${READY_CODE}, expected 503 (no database in CI)"; \
+                    # The application's own readiness answer: which database it
+                    # is on, and whether that database answers. This is the
+                    # same endpoint the deployment gate uses on the real
+                    # sites, so the CI proves the one thing the sites check.
+                    READY=$(curl -fsS "http://127.0.0.1:${VERIFY_PORT}/api/db/connection")
+                    echo "${READY}"
+                    echo "${READY}" | grep -q '"isReachable":true' \
+                        || { echo "BLOCKED: the application did not reach its database"; \
+                             podman logs hku-intranet-verify-${BUILD_NUMBER} || true; \
+                             exit 1; }
+                    echo "${READY}" | grep -q '"databaseName":"engg_intranet_verify"' \
+                        || { echo "BLOCKED: the application is on the wrong database"; \
                              podman logs hku-intranet-verify-${BUILD_NUMBER} || true; \
                              exit 1; }
 
-                    echo "Webpage verified: /health ok + SPA root div + readiness 503 (degraded) on 127.0.0.1:${VERIFY_PORT}"
+                    echo "Webpage verified: /health ok + SPA root div + database reachable on 127.0.0.1:${VERIFY_PORT}"
                 '''
             }
             post {
                 always {
-                    sh 'podman rm -f hku-intranet-verify-${BUILD_NUMBER} || true'
+                    sh '''
+                        # --ignore matters: `podman rm -f` aborts the whole
+                        # operation — silently, with rc 0 — when ONE of the
+                        # names does not exist. Without --ignore the leftover
+                        # container keeps port 55432 and the next build fails.
+                        podman rm -f --ignore hku-intranet-verify-${BUILD_NUMBER} \
+                                           hku-verify-db-${BUILD_NUMBER} || true
+                    '''
                 }
             }
         }
@@ -1024,10 +1090,16 @@ pipeline {
                     # container is alive on its own host.
                     curl -fsS "http://${UAT_HOST}:${UAT_PORT}/health"
                     echo ""
-                    READY=$(curl -fsS "http://${UAT_HOST}:${UAT_PORT}/health/ready")
+                    # The application reports which database it is connected to
+                    # and whether that database answers. That is what proves
+                    # UAT is a separate data set and not a second view of
+                    # production.
+                    READY=$(curl -fsS "http://${UAT_HOST}:${UAT_PORT}/api/db/connection")
                     echo "${READY}"
-                    echo "${READY}" | grep -q "\"database\":\"${UAT_DB}\"" \
+                    echo "${READY}" | grep -q "\"databaseName\":\"${UAT_DB}\"" \
                         || { echo "BLOCKED: UAT is serving the wrong database, expected ${UAT_DB}"; exit 1; }
+                    echo "${READY}" | grep -q '"isReachable":true' \
+                        || { echo "BLOCKED: UAT cannot reach its database ${UAT_DB}"; exit 1; }
 
                     echo "UAT deployed: http://${UAT_HOST}:${UAT_PORT}/  (database ${UAT_DB})"
                 '''
@@ -1074,10 +1146,12 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
 
                     curl -fsS "http://${PROD_HOST}:${PROD_PORT}/health"
                     echo ""
-                    READY=$(curl -fsS "http://${PROD_HOST}:${PROD_PORT}/health/ready")
+                    READY=$(curl -fsS "http://${PROD_HOST}:${PROD_PORT}/api/db/connection")
                     echo "${READY}"
-                    echo "${READY}" | grep -q "\"database\":\"${PROD_DB}\"" \
+                    echo "${READY}" | grep -q "\"databaseName\":\"${PROD_DB}\"" \
                         || { echo "BLOCKED: PROD is serving the wrong database, expected ${PROD_DB}"; exit 1; }
+                    echo "${READY}" | grep -q '"isReachable":true' \
+                        || { echo "BLOCKED: PROD cannot reach its database ${PROD_DB}"; exit 1; }
 
                     echo "PROD deployed: http://${PROD_HOST}:${PROD_PORT}/  (database ${PROD_DB})"
                 '''
@@ -1100,7 +1174,13 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
                 # Aqua scanner's scan-target container is the usual one), and
                 # a container holding an image makes `podman rmi` refuse:
                 #     image used by <id>: image is in use by a container
-                podman rm -f aqua-scan-${BUILD_NUMBER} \
+                #
+                # --ignore is REQUIRED here: `podman rm -f` gives up on the
+                # WHOLE operation — silently, with rc 0 — when one of the
+                # names does not exist. Most of these names do not exist in
+                # any given build, so without --ignore this block removes
+                # nothing at all.
+                podman rm -f --ignore aqua-scan-${BUILD_NUMBER} \
                              aqua-scan-reg-${BUILD_NUMBER} \
                              hku-audit-${BUILD_NUMBER} \
                              hku-audit-fs-${BUILD_NUMBER} \
@@ -1108,13 +1188,14 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
                              hku-trivy-fs-${BUILD_NUMBER} \
                              hku-trivy-os-${BUILD_NUMBER} \
                              hku-trivy-os-high-${BUILD_NUMBER} \
-                             hku-intranet-verify-${BUILD_NUMBER} 2>/dev/null || true
+                             hku-intranet-verify-${BUILD_NUMBER} \
+                             hku-verify-db-${BUILD_NUMBER} 2>/dev/null || true
 
                 # Force-clear any other container still holding the scan-only
                 # image. ${SCAN_IMAGE} is never used by the production
                 # container, so removing its holders is always safe.
                 for c in $(podman ps -aq --filter ancestor=${SCAN_IMAGE} 2>/dev/null); do
-                    podman rm -f "$c" || true
+                    podman rm -f --ignore "$c" || true
                 done
 
                 # Deliberately NOT --force: if the production container is
