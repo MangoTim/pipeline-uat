@@ -18,7 +18,7 @@ GitHub ──▶ code scan ──▶ build ──▶ push ──▶ image scan �
 |---|---|
 | `Jenkinsfile` | the pipeline itself — every stage, in order |
 | `ansible/` | what actually puts the image on a site (`ansible/README.md`) |
-| `scripts/` | the one-time setup for the Jenkins agent container |
+| `scripts/` | the one-time setup for the Jenkins agent container, and the two scope scripts the scan gates use (`audit_scope.py`, `trivy_scope.py`) |
 | `docs/diagrams/pipeline/` | the design picture and the builder that draws it (`docs/README.md`) |
 | `RUNBOOK.md` | day-two notes — running a build, reading a failure, rolling back |
 
@@ -63,10 +63,10 @@ over the network — the same path a real promotion takes.
 | `Checkout` | this repository, from `MangoTim/pipeline-uat` | |
 | `Fetch App Source` | clones `MangoTim/hku-calendar` at `main`, records the commit | |
 | `Resolve Version` | reads `app/VERSION` → the `major.minor` of the image tag | |
-| `Code Scan (secrets + dependencies)` | `trivy fs --scanners secret .` on the source, and `bun audit --audit-level=high` | **hard gate** |
+| `Code Scan (secrets + dependencies)` | `trivy fs --scanners secret .` on the source, and `bun audit --json` — both sorted by `scripts/audit_scope.py` into what ships and what is only a build tool | **hard gate** |
 | `Build Image` | `podman build` of the builder stage and the runtime stage | |
 | `Push to Registry` | `podman push`, then proves the pushed digest is the scanned digest | |
-| `Image Scan` | Aqua registry scan + Trivy on the library tree and on the OS packages | **hard gate** |
+| `Image Scan` | Aqua registry scan + Trivy on the library tree (sorted by `scripts/trivy_scope.py`) and on the OS packages | **hard gate** |
 | `Deploy & Verify` | boots the image once on the CI host to prove it starts | |
 | `Deploy UAT (Database & Application)` | Ansible → `.104:8097`, then checks the database it is connected to | |
 | `Manual Approval` | a human decides whether production gets it | **human gate** |
@@ -79,6 +79,47 @@ react-router-dom, typescript) is invisible to an image scan — and `xlsx` is
 bundled into `dist/assets/xlsx-*.js` as a minified chunk with no package
 metadata, so no scanner can map it back to a version either. The source scan
 sees the tree that the image does not.
+
+---
+
+## What counts as a finding
+
+Neither `bun audit` nor Trivy can tell a **build tool** from a **delivered
+package** on their own:
+
+- `bun audit` reads the lockfile, and the lockfile holds both trees.
+- Trivy reports the file it found the package in. `bun install` hoists, so
+  `picomatch` sits at `app/node_modules/picomatch/package.json` whether it
+  was reached through `vite` or not — the path hides the parent.
+
+So the pipeline decides for itself, from the lockfiles, using the same rule in
+both places:
+
+| | SHIPPED — blocks the build | BUILD-ONLY — reported, does not block |
+|---|---|---|
+| `bun audit` | `scripts/audit_scope.py` | |
+| Trivy (image) | `scripts/trivy_scope.py` | |
+
+What each workspace ships is **not** the same:
+
+| | what ships | why |
+|---|---|---|
+| frontend | its production closure | only the compiled `dist/` bundle is delivered — the frontend `node_modules` are not in the runtime image at all |
+| server | its **whole** installed tree | the runtime image copies `server/` straight out of the builder, so `server/node_modules` — devDependencies included — really do reach the customer |
+
+The match is by name **and** version, because the two workspaces can carry the
+same package at different versions: `typescript` 6.0.3 is the frontend build
+tool, `typescript` 5.7.2 is the copy that ships.
+
+The one finding this currently keeps out of the way is **picomatch 4.0.7**
+(`GHSA-fc5q-39xc-vjpf`, HIGH, ReDoS) — the latest release, so there is no
+fixed version to install, and it is reached only through `vite`. It is printed
+in both reports, every build, with the path that reaches it.
+
+A report that cannot be read is **not** a pass: both scripts exit 2 and the
+gate blocks, because "not verified" must never look like "clean". Secrets are
+never scoped — a hardcoded credential is a finding wherever it is, so a secret
+always blocks.
 
 ---
 
@@ -210,7 +251,7 @@ in a way that is easy to misread.
 
 ### The Jenkins job
 
-14. **Create the job** — a NEW job, separate from `mcp-dr-pipeline`:
+14. **The job** — `pipeline-uat`, a NEW job, separate from `mcp-dr-pipeline`:
 
     | | |
     |---|---|
@@ -222,6 +263,14 @@ in a way that is easy to misread.
     The pipeline's own repository IS the pipeline: the Jenkinsfile, the Ansible
     roles and the setup script are all committed here, and the deploy stages
     run `${WORKSPACE}/ansible/deploy.yml` from it.
+
+    The job was created on 2026-11-12. One thing still has to be filled in by
+    hand before the first *real* build, because it is a per-install secret
+    rather than repository content:
+
+    | | |
+    |---|---|
+    | the `aqua-console` credential | see item 2 above — the Aqua scanner CLI needs it |
 
 ---
 

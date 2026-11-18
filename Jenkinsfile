@@ -205,16 +205,22 @@
 //
 //     'Code Scan (secrets + dependencies)'   BEFORE the build, on the source
 //        trivy fs --scanners secret .            the working tree, no image
-//        bun audit --audit-level=high            the lockfiles, in a
+//        bun audit --json                        the lockfiles, in a
 //                                                 throwaway oven/bun:1.3-alpine
 //                                                 container with the source
 //                                                 mounted — no build needed
+//        scripts/audit_scope.py                  sorts the findings into what
+//                                                 SHIPS and what is only a
+//                                                 build tool (see below)
 //
 //     'Image Scan'                            AFTER the push, on the images
 //        Aqua scan (--local and --registry)      the image that ships
 //        trivy vuln,secret --pkg-types library   ${SCAN_IMAGE} — the builder
 //                                                  stage, which still holds the
 //                                                  full frontend dependency tree
+//        scripts/trivy_scope.py                  sorts those findings into what
+//                                                 SHIPS and what is only a
+//                                                 build tool (see below)
 //        trivy vuln --pkg-types os               ${FULL_IMAGE} — the runtime
 //                                                  base we actually ship
 //
@@ -280,8 +286,43 @@
 //     needed. The `bun audit` ignore list was deleted: the audit is now
 //     clean with NO exceptions.
 //
-//   * Trivy runs with --exit-code 1, so its output is a HARD GATE: any
-//     HIGH/CRITICAL library CVE or any secret it detects fails the build.
+//   * picomatch 4.0.7 has a HIGH ReDoS advisory
+//     (GHSA-fc5q-39xc-vjpf) and it is the LATEST release — there is no fixed
+//     version to install. It is reached only through `vite`, a build tool:
+//         vite > picomatch
+//     It never reaches the customer. Neither `bun audit` nor Trivy can tell
+//     the two apart on their own: `bun audit` reads the lockfile and the
+//     lockfile holds both trees, and Trivy's finding list has no idea either
+//     (bun hoists, so picomatch sits at app/node_modules/picomatch/… and the
+//     path hides the vite parent). So the pipeline splits the findings
+//     itself, with the same rule in both places:
+//         scripts/audit_scope.py   for the `bun audit` report (code scan)
+//         scripts/trivy_scope.py   for the Trivy image report (image scan)
+//     An advisory on a package in the PRODUCTION closure blocks the build; an
+//     advisory on a build tool is printed with the path that reaches it and
+//     does not. This is the same rule npm applies with `npm audit --omit=dev`.
+//
+//   * What the two workspaces ship is NOT the same, and the scope scripts
+//     know it:
+//         frontend  only the compiled `dist/` bundle is delivered — the
+//                   frontend node_modules are not in the runtime image at
+//                   all, so the frontend ships its production closure and
+//                   nothing else.
+//         server    the runtime image copies `server/` straight out of the
+//                   builder, so `server/node_modules` — devDependencies
+//                   included — DOES reach the customer. The server therefore
+//                   ships its whole installed tree, and the scope scripts
+//                   are told so (--ship-dev / --server-ship-dev).
+//     The match is by name AND version, because the two workspaces can
+//     carry the same package at different versions: typescript 6.0.3 is the
+//     frontend build tool, typescript 5.7.2 is the copy that ships.
+//
+//   * Trivy's report is a HARD GATE, but the decision about what counts is
+//     made by scripts/trivy_scope.py, not by --exit-code: a HIGH/CRITICAL
+//     advisory on a package that SHIPS, or any secret at all, fails the
+//     build. An advisory on a build tool is reported and does not. A report
+//     that cannot be read fails the build too — "not verified" must never
+//     look like "clean".
 //     Trivy's rules currently match NOTHING in this tree, so two real
 //     hardcoded fallbacks still survive the scanner (but not code review):
 //       server/src/db.ts          → process.env.DB_PASSWORD || 'redhat'
@@ -527,12 +568,13 @@ pipeline {
                     echo "trivy (source secrets) exit code: ${SECRET_RC}"
 
                     # ------------------------------------------------------------------
-                    # 2. bun audit — dependency CVEs straight from the lockfiles.
+                    # 2. bun audit — dependency advisories straight from the lockfiles.
                     #    `bun audit` reads ONLY the lockfile, so it needs neither
                     #    a build nor node_modules: the source tree is mounted
                     #    into a throwaway bun container and the audit runs
-                    #    there. Root workspace first, then server/ (it has its
-                    #    own lockfile).
+                    #    there. One JSON file per workspace, because the two
+                    #    workspaces have their own lockfile and their own
+                    #    dependency tree.
                     #
                     #    The mount is READ-WRITE on purpose: bun opens
                     #    package.json for writing while it resolves the
@@ -541,24 +583,24 @@ pipeline {
                     #    a scan failure, not a finding. Nothing is written:
                     #    the directory is identical before and after.
                     # ------------------------------------------------------------------
-                    BUN_RC=0
                     podman run --rm --name hku-audit-fs-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
                         -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/app \
                         --entrypoint sh -w /app oven/bun:1.3-alpine \
-                        -c '
-                            rc=0
-                            echo "### bun audit — workspace root"
-                            bun audit --audit-level=high || rc=$?
-                            cd server
-                            echo ""
-                            echo "### bun audit — server/"
-                            bun audit --audit-level=high || rc=$?
-                            exit $rc
-                        ' > bun-audit.txt 2>&1 || BUN_RC=$?
+                        -c 'bun audit --json' > bun-audit-root.json 2> bun-audit-root.log || true
 
-                    cat bun-audit.txt
-                    echo "bun audit exit code: ${BUN_RC}"
+                    podman run --rm --name hku-audit-fs-srv-${BUILD_NUMBER} \
+                        --network host --security-opt label=disable \
+                        -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/app \
+                        --entrypoint sh -w /app/server oven/bun:1.3-alpine \
+                        -c 'bun audit --json' > bun-audit-server.json 2> bun-audit-server.log || true
+
+                    echo "### bun audit — frontend (app/bun.lock)"
+                    cat bun-audit-root.json
+                    echo ""
+                    echo "### bun audit — server (app/server/bun.lock)"
+                    cat bun-audit-server.json
+                    echo ""
 
                     # ------------------------------------------------------------------
                     # Gate: a secret anywhere in the source tree.
@@ -569,19 +611,66 @@ pipeline {
                     fi
 
                     # ------------------------------------------------------------------
-                    # Gate: HIGH/CRITICAL dependency advisories.
+                    # Gate: HIGH/CRITICAL advisories — but only for the
+                    # dependencies that actually SHIP.
+                    #
+                    # `bun audit` has no way to tell a build tool from a
+                    # delivered package: it reads the lockfile, and the
+                    # lockfile holds both trees. So the report is split by
+                    # scripts/audit_scope.py, which walks the lockfile and
+                    # works out the production closure:
+                    #
+                    #   * a package in that closure SHIPS. An advisory on it
+                    #     is a real finding and blocks the build.
+                    #   * any other package is a build tool. The advisory is
+                    #     printed with the path that reaches it, but it does
+                    #     not block — picomatch, for example, is reached only
+                    #     through vite and has no fixed release at all.
+                    #
+                    # The two workspaces do not ship the same thing:
+                    #
+                    #   frontend  only the compiled `dist/` bundle is
+                    #             delivered, so the frontend node_modules
+                    #             never reach the customer.
+                    #   server    the runtime image copies `server/` out of
+                    #             the builder, so `server/node_modules` —
+                    #             devDependencies included — DOES. The server
+                    #             is audited with --ship-dev for that reason.
+                    #
+                    # An audit that could not be read is NOT a pass: the gate
+                    # refuses, because "not verified" must not look like
+                    # "clean".
                     # ------------------------------------------------------------------
-                    if [ "${BUN_RC}" -ne 0 ]; then
-                        echo "BLOCKED: bun audit reported HIGH/CRITICAL dependency advisories (or the npm advisory registry was unreachable) — see bun-audit.txt"
-                        exit 1
-                    fi
+                    scope_gate() {
+                        # $1 label, $2 lockfile, $3 audit json, $4 report file,
+                        # $5 extra flags (may be empty — hence ${5:-}, the
+                        # shell runs with `set -u`)
+                        python3 scripts/audit_scope.py "$2" "$3" \
+                            --level high --label "$1" ${5:-} > "$4" 2>&1
+                        rc=$?
+                        cat "$4"
+                        if [ "$rc" -eq 2 ]; then
+                            echo "BLOCKED: the dependency audit for $1 could not be verified — see $4"
+                            exit 1
+                        fi
+                        if [ "$rc" -ne 0 ]; then
+                            echo "BLOCKED: $1 has a HIGH/CRITICAL advisory in a dependency that SHIPS — see $4"
+                            exit 1
+                        fi
+                    }
 
-                    echo "Code scan OK: no secrets in the source tree, no HIGH/CRITICAL dependency advisories."
+                    scope_gate "the frontend" app/bun.lock \
+                               bun-audit-root.json audit-scope-root.txt
+                    scope_gate "the server" app/server/bun.lock \
+                               bun-audit-server.json audit-scope-server.txt \
+                               --ship-dev
+
+                    echo "Code scan OK: no secrets in the source tree, no HIGH/CRITICAL advisory in any dependency that ships."
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'bun-audit.txt,trivy-secret-report.txt',
+                    archiveArtifacts artifacts: 'bun-audit-root.json,bun-audit-server.json,audit-scope-root.txt,audit-scope-server.txt,trivy-secret-report.txt',
                                      allowEmptyArchive: true
                 }
             }
@@ -846,9 +935,15 @@ pipeline {
                 //           so this scan cannot move to the source tree.
                 //   os       on ${FULL_IMAGE}  — the runtime base we ship.
                 //
-                // HARD GATE: --exit-code 1 turns any HIGH/CRITICAL library
-                // finding, any detected secret, and any CRITICAL OS CVE into a
-                // build failure.
+                // HARD GATE, but the decision is made by scripts/trivy_scope.py
+                // and not by --exit-code. The library report is JSON, because
+                // the raw finding list cannot say whether a package SHIPS:
+                // bun hoists, so picomatch sits at app/node_modules/picomatch
+                // even though only vite reaches it. The scope script reads
+                // the lockfiles and applies the same rule as the code scan:
+                // an advisory on a package that SHIPS, or any secret at all,
+                // blocks the build; an advisory on a build tool is reported
+                // and does not. See the header for the details.
                 // ------------------------------------------------------------------
                 sh '''
                     set -u
@@ -863,6 +958,11 @@ pipeline {
                     # the container it is still called /var/run/docker.sock —
                     # that is the name Trivy and the Aqua scanner look for.
                     # The same mount works for both of them.
+                    #
+                    # No --severity filter here: the scope script applies the
+                    # threshold to the vulnerabilities, and a secret is a
+                    # finding at ANY severity, so none may be filtered away
+                    # before the script sees it.
                     TRIVY_RC=0
                     podman run --rm --name hku-trivy-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
@@ -872,13 +972,37 @@ pipeline {
                         ${TRIVY_IMAGE} \
                         image --scanners vuln,secret \
                             --pkg-types library \
-                            --severity HIGH,CRITICAL \
-                            --exit-code 1 \
-                            --format table \
-                            ${SCAN_IMAGE} > trivy-report.txt 2>&1 || TRIVY_RC=$?
+                            --format json \
+                            ${SCAN_IMAGE} > trivy-report.json 2> trivy-scan.err || TRIVY_RC=$?
+
+                    if [ "${TRIVY_RC}" -ne 0 ]; then
+                        echo "--- trivy stderr ---"
+                        cat trivy-scan.err || true
+                        echo "BLOCKED: the Trivy scan itself failed — see trivy-scan.err"
+                        exit 1
+                    fi
+
+                    # ------------------------------------------------------------------
+                    # The scope gate.
+                    #
+                    #   exit 0  nothing that ships is vulnerable, no secret
+                    #   exit 1  a SHIPPED package has an advisory, or a secret
+                    #   exit 2  the report could not be read — NOT a pass
+                    #
+                    # --server-ship-dev: the runtime image copies `server/`
+                    # out of the builder, so the server's node_modules —
+                    # devDependencies included — really do reach the
+                    # customer. The frontend is the opposite: only the
+                    # compiled bundle ships.
+                    # ------------------------------------------------------------------
+                    TRIVY_SCOPE_RC=0
+                    python3 scripts/trivy_scope.py trivy-report.json \
+                        app/bun.lock app/server/bun.lock \
+                        --level high --server-ship-dev \
+                        > trivy-report.txt 2>&1 || TRIVY_SCOPE_RC=$?
 
                     cat trivy-report.txt
-                    echo "trivy (app dependencies) exit code: ${TRIVY_RC}"
+                    echo "trivy scope exit code: ${TRIVY_SCOPE_RC}"
 
                     # ------------------------------------------------------------------
                     # OS packages of the image we actually ship.
@@ -920,8 +1044,13 @@ pipeline {
                             --format table \
                             ${FULL_IMAGE} >> trivy-os-report.txt 2>&1 || true
 
-                    if [ "${TRIVY_RC}" -ne 0 ]; then
-                        echo "BLOCKED: Trivy reported HIGH/CRITICAL findings, detected a secret, or the scan itself failed — see trivy-report.txt"
+                    if [ "${TRIVY_SCOPE_RC}" -eq 2 ]; then
+                        echo "BLOCKED: the Trivy findings could not be scoped — the scan is not verified, so it is not a pass — see trivy-report.txt"
+                        exit 1
+                    fi
+
+                    if [ "${TRIVY_SCOPE_RC}" -ne 0 ]; then
+                        echo "BLOCKED: Trivy found an advisory in a dependency that SHIPS, or a secret, in the image — see trivy-report.txt"
                         exit 1
                     fi
 
@@ -930,12 +1059,12 @@ pipeline {
                         exit 1
                     fi
 
-                    echo "Image scan OK: no HIGH/CRITICAL library CVEs, no detected secrets, no CRITICAL OS CVEs."
+                    echo "Image scan OK: no HIGH/CRITICAL advisory in anything that ships, no detected secrets, no CRITICAL OS CVEs."
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'aqua-report.html,aqua-scan.err,aqua-registry-report.html,aqua-registry-scan.err,trivy-report.txt,trivy-os-report.txt',
+                    archiveArtifacts artifacts: 'aqua-report.html,aqua-scan.err,aqua-registry-report.html,aqua-registry-scan.err,trivy-report.txt,trivy-report.json,trivy-scan.err,trivy-os-report.txt',
                                      allowEmptyArchive: true
                 }
             }
@@ -1184,6 +1313,7 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
                              aqua-scan-reg-${BUILD_NUMBER} \
                              hku-audit-${BUILD_NUMBER} \
                              hku-audit-fs-${BUILD_NUMBER} \
+                             hku-audit-fs-srv-${BUILD_NUMBER} \
                              hku-trivy-${BUILD_NUMBER} \
                              hku-trivy-fs-${BUILD_NUMBER} \
                              hku-trivy-os-${BUILD_NUMBER} \
@@ -1218,7 +1348,7 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
                     <p><b>UAT</b>: <a href=\"http://${UAT_HOST}:${UAT_PORT}/\">http://${UAT_HOST}:${UAT_PORT}/</a> (database <code>${UAT_DB}</code>) — approved for production</p>
                     <p><b>PROD</b>: <a href=\"http://${PROD_HOST}:${PROD_PORT}/\">http://${PROD_HOST}:${PROD_PORT}/</a> (database <code>${PROD_DB}</code>)</p>
                     <p>Same tag and digest in both — UAT and PROD run the identical image.</p>
-                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, bun-audit.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
+                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
                 """,
@@ -1233,7 +1363,7 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
                 body: """<h2>HKU ENGG Intranet — CI/CD — Build #${BUILD_NUMBER} FAILED</h2>
                     <p>Image: <code>${env.FULL_IMAGE ?: 'unresolved'}</code></p>
                     <p>Check the console for the failure stage. If it stopped at <b>Manual Approval</b>, nothing was deployed to production.</p>
-                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, bun-audit.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
+                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
                 """,
