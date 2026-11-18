@@ -1225,7 +1225,12 @@ pipeline {
                     # production.
                     READY=$(curl -fsS "http://${UAT_HOST}:${UAT_PORT}/api/db/connection")
                     echo "${READY}"
-                    echo "${READY}" | grep -q "\"databaseName\":\"${UAT_DB}\"" \
+                    # The pattern is built by concatenation, not with backslash
+                    # escapes: Groovy eats the backslash in a triple-quoted
+                    # block, and dash then strips the quotes, so grep would be
+                    # handed databaseName:engg_intranet_uat, which never matches
+                    # the quoted key in the JSON.
+                    echo "${READY}" | grep -q '"databaseName":"'"${UAT_DB}"'"' \
                         || { echo "BLOCKED: UAT is serving the wrong database, expected ${UAT_DB}"; exit 1; }
                     echo "${READY}" | grep -q '"isReachable":true' \
                         || { echo "BLOCKED: UAT cannot reach its database ${UAT_DB}"; exit 1; }
@@ -1277,7 +1282,9 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
                     echo ""
                     READY=$(curl -fsS "http://${PROD_HOST}:${PROD_PORT}/api/db/connection")
                     echo "${READY}"
-                    echo "${READY}" | grep -q "\"databaseName\":\"${PROD_DB}\"" \
+                    # Same construction as the UAT check above, and for the
+                    # same reason.
+                    echo "${READY}" | grep -q '"databaseName":"'"${PROD_DB}"'"' \
                         || { echo "BLOCKED: PROD is serving the wrong database, expected ${PROD_DB}"; exit 1; }
                     echo "${READY}" | grep -q '"isReachable":true' \
                         || { echo "BLOCKED: PROD cannot reach its database ${PROD_DB}"; exit 1; }
