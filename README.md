@@ -274,6 +274,44 @@ in a way that is easy to misread.
 
 ---
 
+## The webhook
+
+The pipeline does not have to be started from the Jenkins UI. The Jenkinsfile
+declares
+
+```groovy
+triggers {
+    githubPush()
+}
+```
+
+and the job is a *Pipeline script from SCM* whose SCM is
+`https://github.com/MangoTim/pipeline-uat.git`. The GitHub plugin matches an
+incoming push against the job's SCM, so **a push to `main` of this repository
+starts the run** — no button to press.
+
+Two things had to be in place for that to work:
+
+| | |
+|---|---|
+| a GitHub server in Jenkins | *Manage Jenkins → System → GitHub* — the API URL `https://api.github.com`, "Manage hooks" on, and a credential whose password is the personal access token. Without it the plugin has nowhere to look and the delivery is dropped. |
+| a hook on the repository | the GitHub side: a `web` hook on `MangoTim/pipeline-uat`, `push` events, pointing at Jenkins' `/github-webhook/` endpoint |
+
+The delivery has to reach Jenkins from the internet, and Jenkins lives on a
+private LAN. The hook URL is therefore a tunnel. **A quick Cloudflare tunnel
+is the URL used here**, and that has one sharp edge worth knowing before a
+demo: a quick tunnel has no uptime guarantee and its hostname changes every
+time it is restarted, so after a restart the hook has to be pointed at the new
+hostname.
+
+For a permanent URL, use a *named* Cloudflare tunnel — it is free and gives
+a stable `*.cfargotunnel.com` hostname — or give ngrok a second domain. The
+ngrok account on the demo host cannot: it is on the free plan, which allows
+exactly one reserved domain, and that one is already serving the public
+demo.
+
+---
+
 ## The image tag
 
 The image is tagged with a version, not a build counter:
