@@ -61,13 +61,15 @@ that is the whole point of the gate.
 ## 3. Checking a site
 
 ```bash
-curl -s http://192.168.147.104:8097/health          # UAT  -> "ok"
-curl -s http://192.168.147.104:8097/health/ready     # UAT  -> "database":"engg_intranet_uat"
-curl -s http://192.168.147.105:8093/health/ready     # PROD -> "database":"engg_intranet"
+curl -s http://192.168.147.104:8097/health              # UAT  -> {"status":"ok","db":"ok"}
+curl -s http://192.168.147.104:8097/api/db/connection   # UAT  -> "databaseName":"engg_intranet_uat"
+curl -s http://192.168.147.105:8093/api/db/connection   # PROD -> "databaseName":"engg_intranet"
 ```
 
-The database name in `/health/ready` is the quickest proof that UAT and PROD
-are different environments and not the same data wearing two hats.
+The database name in `/api/db/connection` is the quickest proof that UAT and
+PROD are different environments and not the same data wearing two hats. There
+is **no** `/health/ready` endpoint: the SPA catch-all answers that path with
+the index page, so the check has to ask the API — which is what the role does.
 
 On the hosts themselves:
 

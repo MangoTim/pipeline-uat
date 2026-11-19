@@ -253,8 +253,9 @@ carries the host it must reach.
 4. Installs the systemd user unit and **restarts** it. (Not `enable --now`:
    that is a no-op on an already-active unit, so the container would keep
    running the previous image.)
-5. Waits for the port, then checks `/health` (liveness) and `/health/ready`
-   (readiness — a real `SELECT 1` against the database).
+5. Waits for the port, then checks `/health` (liveness) and
+   `/api/db/connection` (readiness — it names the database and reports
+   whether it answers).
 6. Asserts the running container is the promoted image, and that the site is
    talking to the database it is supposed to talk to.
 7. Removes the superseded images. `rmi` refuses to remove an image a running
@@ -263,13 +264,16 @@ carries the host it must reach.
 ## Checking a site
 
 ```bash
-curl -s http://192.168.147.104:8097/health          # UAT
-curl -s http://192.168.147.104:8097/health/ready     # UAT  -> "database":"engg_intranet_uat"
-curl -s http://192.168.147.105:8093/health/ready     # PROD -> "database":"engg_intranet"
+curl -s http://192.168.147.104:8097/health              # UAT
+curl -s http://192.168.147.104:8097/api/db/connection   # UAT  -> "databaseName":"engg_intranet_uat"
+curl -s http://192.168.147.105:8093/api/db/connection   # PROD -> "databaseName":"engg_intranet"
 
 ssh uat@192.168.147.104 'systemctl --user status hku-intranet-uat.service; podman images'
 ssh rhai@192.168.147.105 'systemctl --user status hku-intranet.service; podman images'
 ```
 
-The database name in `/health/ready` is the quickest proof that UAT and PROD
-are different environments and not the same data wearing two hats.
+The database name in `/api/db/connection` is the quickest proof that UAT and
+PROD are different environments and not the same data wearing two hats.
+
+There is **no** `/health/ready` endpoint: the SPA catch-all answers that path
+with the index page, so the check has to ask the API.
