@@ -196,8 +196,16 @@ pipeline {
                     def raw = readFile('promotion.env')
 
                     // KEY=VALUE, one per line. '#' starts a comment.
+                    //
+                    // NOT `raw.eachLine { ... }`. In the CPS sandbox a closure
+                    // over a String is dispatched to the wrong overload and
+                    // the build dies with "expected to call
+                    // java.lang.String.eachLine but wound up catching
+                    // CpsClosure2.call" — before it reaches a single check.
+                    // A plain loop over the split lines has no closure to
+                    // dispatch, so it cannot go wrong that way.
                     def record = [:]
-                    raw.eachLine { line ->
+                    for (String line : raw.split('\n')) {
                         def t = line.trim()
                         if (t && !t.startsWith('#') && t.contains('=')) {
                             def i = t.indexOf('=')
@@ -208,13 +216,13 @@ pipeline {
                     // The keys this job needs. A record without one of them
                     // is not a record this job can use, and saying so is more
                     // useful than a null further down.
-                    def keys = ['PROMOTION_ID', 'UAT_BUILD_NUMBER', 'UAT_BUILD_URL',
-                                'CREATED_AT', 'CREATED_AT_EPOCH',
-                                'FULL_IMAGE', 'IMAGE_DIGEST', 'IMAGE_VERSION',
-                                'REGISTRY', 'IMAGE_NAME',
-                                'APP_REPO', 'APP_REF', 'APP_COMMIT',
-                                'UAT_HOST', 'UAT_PORT', 'UAT_DB']
-                    keys.each { key ->
+                    String[] keys = ['PROMOTION_ID', 'UAT_BUILD_NUMBER', 'UAT_BUILD_URL',
+                                      'CREATED_AT', 'CREATED_AT_EPOCH',
+                                      'FULL_IMAGE', 'IMAGE_DIGEST', 'IMAGE_VERSION',
+                                      'REGISTRY', 'IMAGE_NAME',
+                                      'APP_REPO', 'APP_REF', 'APP_COMMIT',
+                                      'UAT_HOST', 'UAT_PORT', 'UAT_DB']
+                    for (String key : keys) {
                         if (!record[key]) {
                             error("The promotion record ${recordPath} has no ${key} line — " +
                                   "it is not a record this job can use.")
@@ -228,7 +236,7 @@ pipeline {
 
                     // The record is the source of truth about the artefact.
                     // These overwrite the environment block's defaults.
-                    keys.each { key -> env[key] = record[key] }
+                    for (String key : keys) { env[key] = record[key] }
                     env.MAX_AGE_HOURS = maxAgeHours
 
                     echo "Promotion record : ${recordPath}"
