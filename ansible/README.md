@@ -4,11 +4,16 @@ The pipeline builds the image, pushes it to the registry, scans it, and then
 **stops**. This directory is what actually puts it on a site.
 
 ```
-build → push → scan ──▶ deploy UAT ──▶ MANUAL APPROVAL ──▶ deploy PROD
-                          .104:8097                          .105:8093
-                          db engg_intranet_uat               db engg_intranet
-                          (db on .103)                       (db on .103)
+build → push → scan ──▶ deploy UAT ──▶ record ──▶ [ approval ] ──▶ deploy PROD
+                          .104:8097                           .105:8093
+                          db engg_intranet_uat                db engg_intranet
+                          (db on .103)                        (db on .103)
 ```
+
+The deploy is split across **two Jenkins jobs**. The UAT job builds, scans and
+deploys UAT, then writes down what it deployed. The PROD job reads that record
+back, and the approval happens inside it — so the gate is a job boundary, and
+the human test is not squeezed into a suspended build.
 
 Both sites run the **same tag** — the one the pipeline pushed and scanned. The
 approval decides *whether* those exact bytes reach production, never *which*

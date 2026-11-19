@@ -1,14 +1,29 @@
 # pipeline-uat — the HKU ENGG Intranet CI/CD pipeline
 
 The pipeline that takes the intranet application from a commit on GitHub to a
-running container on the UAT site, waits for a human to say yes, and then puts
-the **same bytes** on the production site.
+running container on the UAT site, and — **after a human has tested it** — the
+**same bytes** on the production site.
+
+It is **two Jenkins jobs**, not one:
 
 ```
-GitHub ──▶ code scan ──▶ build ──▶ push ──▶ image scan ──▶ UAT ──▶ APPROVAL ──▶ PROD
-          (Trivy,      (podman)  (registry)  (Aqua +      .104:8097           .105:8093
-           bun audit)                                  Trivy)  engg_intranet_uat  engg_intranet
+GitHub ──▶ [ pipeline-uat ] ──▶ registry
+          code scan → build → push → image scan → UAT → record the promotion
+          (Trivy,     (podman)  (registry)  (Aqua +  .104:8097
+           bun audit)                      Trivy)   engg_intranet_uat
+                                                         │
+                                    the human tests UAT  │
+                                                         ▼
+                              [ pipeline-prod ]  ──▶ PROD
+                              load the record → verify → APPROVAL → deploy
+                                                             .105:8093
+                                                             engg_intranet
 ```
+
+The split is the point. The UAT job **finishes** and leaves UAT running; the
+human test happens *between* the two jobs — an hour later, overnight, whatever.
+The PROD job is started by hand, and it promotes the exact bytes that were
+tested.
 
 ---
 
@@ -16,7 +31,8 @@ GitHub ──▶ code scan ──▶ build ──▶ push ──▶ image scan �
 
 | | |
 |---|---|
-| `Jenkinsfile` | the pipeline itself — every stage, in order |
+| `Jenkinsfile` | the **UAT job** — every stage, in order |
+| `Jenkinsfile.prod` | the **PROD job** — load the record, verify it, approve, deploy |
 | `ansible/` | what actually puts the image on a site (`ansible/README.md`) |
 | `scripts/` | the one-time setup for the Jenkins agent container, and the two scope scripts the scan gates use (`audit_scope.py`, `trivy_scope.py`) |
 | `docs/diagrams/pipeline/` | the design picture and the builder that draws it (`docs/README.md`) |
@@ -58,6 +74,8 @@ over the network — the same path a real promotion takes.
 
 ## The stages
 
+### Job `pipeline-uat` — build and deploy UAT
+
 | Stage | What it does | Gate |
 |---|---|---|
 | `Checkout` | this repository, from `MangoTim/pipeline-uat` | |
@@ -69,8 +87,22 @@ over the network — the same path a real promotion takes.
 | `Image Scan` | Aqua registry scan + Trivy on the library tree (sorted by `scripts/trivy_scope.py`) and on the OS packages | **hard gate** |
 | `Deploy & Verify` | boots the image once on the CI host to prove it starts | |
 | `Deploy UAT (Database & Application)` | Ansible → `.104:8097`, then checks the database it is connected to | |
+| `Record Promotion` | writes what was deployed — image, digest, app commit, UAT endpoint — to a file under `JENKINS_HOME` | |
+
+This job never touches production. A push to `main` starts it.
+
+### Job `pipeline-prod` — promote what was tested
+
+| Stage | What it does | Gate |
+|---|---|---|
+| `Checkout` | this repository, from `MangoTim/pipeline-uat` | |
+| `Load Promotion Record` | reads the record the UAT job wrote; fails if there is none | |
+| `Verify Promotion` | the tag still points at the tested bytes · UAT is still running that image · the record is not too old | **hard gate** |
 | `Manual Approval` | a human decides whether production gets it | **human gate** |
 | `Deploy PROD (Database & Application)` | Ansible → `.105:8093`, then checks the database it is connected to | |
+
+This job has **no `triggers` block**, so a push can never start it. It never
+builds and never pushes: the tag comes from the record.
 
 The code scan runs **before** the build on purpose. The runtime image is
 multi-stage: it ships `dist/` and `server/node_modules` but NOT the frontend
@@ -125,23 +157,60 @@ always blocks.
 
 ## What the approval decides
 
-UAT and PROD run the **same tag** — the one this build pushed and scanned. The
-tag never changes between them. So the approval decides **whether** those exact
-bytes reach production, never **which** bytes that is.
+UAT and PROD run the **same tag** — the one the UAT build pushed and scanned.
+The tag never changes between them. So the approval decides **whether** those
+exact bytes reach production, never **which** bytes that is.
 
 The message the human sees carries the image reference, the registry digest,
-the application commit, and the UAT URL with the database it is serving:
+the application commit, the UAT URL with the database it is serving, and the
+UAT build number the bytes came from:
 
 ```
   image    : 192.168.147.104:8082/hku-intranet:v1.1.17112601
   digest   : sha256:...
   app      : https://github.com/MangoTim/hku-calendar.git @ <commit>
   UAT      : http://192.168.147.104:8097/   (health ok, database engg_intranet_uat)
+  UAT build: #14   (recorded 2026-11-18T16:40:12+08:00)
   PROD     : http://192.168.147.105:8093/
 ```
 
 `input` is **core Jenkins** — no plugin is needed. `submitter` is deliberately
 not set, so anybody with the right permission can approve.
+
+## The promotion record — how the two jobs talk to each other
+
+The PROD job cannot simply be told "deploy whatever UAT has", because by the
+time it runs, UAT may have been redeployed. It is told **which bytes were
+tested**, and it checks that they are still the ones on offer.
+
+The UAT job writes that down as a small `KEY=VALUE` file, after its UAT health
+and database checks have passed:
+
+```
+/var/jenkins_home/promotions/intranet/uat-<UAT build number>.env
+/var/jenkins_home/promotions/intranet/latest.env
+```
+
+`JENKINS_HOME` lives in the `jenkins_data` volume, so a record survives a
+container recreate — the same lifetime as the jobs and the credentials.
+
+A **file** is the carrier because the controller has no `parameterized-trigger`,
+no `copy-artifact` and no `job-dsl`: the usual
+`build job: 'x', parameters: [...]` is not available. Both jobs run in the
+same container on the same volume, so a file under `JENKINS_HOME` does the job.
+
+Before the gate opens, the PROD job checks three things:
+
+| Check | What it proves | What happens if it fails |
+|---|---|---|
+| the digest | the tag in the registry still points at the recorded bytes | **BLOCKED** — the tag was overwritten after the UAT test |
+| the UAT site | UAT is still running **that image**, not merely up | **BLOCKED** — somebody re-ran the UAT job, so the evidence is gone |
+| the age | the record is not older than `MAX_AGE_HOURS` (default 72) | **BLOCKED** — re-run the UAT job, or raise the parameter |
+
+The UAT check is the one that is easy to overlook. "UAT is up" is not the same
+as "UAT is running what you tested": re-running the UAT job replaces the site
+while it still answers. The PROD job asks the running container for its image
+reference and compares it with the record.
 
 ---
 
@@ -249,28 +318,38 @@ in a way that is easy to misread.
 
 13. **The port open** — 8093.
 
-### The Jenkins job
+### The Jenkins jobs
 
-14. **The job** — `pipeline-uat`, a NEW job, separate from `mcp-dr-pipeline`:
+14. **The jobs** — two of them, both from the same repository, both separate
+    from `mcp-dr-pipeline`:
 
-    | | |
-    |---|---|
-    | Definition | *Pipeline script from SCM* |
-    | SCM | Git · `https://github.com/MangoTim/pipeline-uat.git` |
-    | Branch | `*/main` |
-    | Script Path | `Jenkinsfile` |
+    | | `pipeline-uat` | `pipeline-prod` |
+    |---|---|---|
+    | Definition | *Pipeline script from SCM* | *Pipeline script from SCM* |
+    | SCM | Git · `https://github.com/MangoTim/pipeline-uat.git` | the same |
+    | Branch | `*/main` | the same |
+    | Script Path | `Jenkinsfile` | `Jenkinsfile.prod` |
+    | Trigger | `githubPush()` — a push starts it | **none** — a human starts it |
+    | Parameters | none | `PROMOTION_ID` (default `latest`), `MAX_AGE_HOURS` (default `72`) |
 
-    The pipeline's own repository IS the pipeline: the Jenkinsfile, the Ansible
-    roles and the setup script are all committed here, and the deploy stages
-    run `${WORKSPACE}/ansible/deploy.yml` from it.
+    The pipeline's own repository IS the pipeline: the Jenkinsfiles, the
+    Ansible roles and the setup script are all committed here, and the deploy
+    stages run `${WORKSPACE}/ansible/deploy.yml` from it.
 
-    The job was created on 2026-11-12. One thing still has to be filled in by
-    hand before the first *real* build, because it is a per-install secret
-    rather than repository content:
+    `pipeline-uat` was created on 2026-11-12. One thing still has to be filled
+    in by hand before the first *real* build, because it is a per-install
+    secret rather than repository content:
 
     | | |
     |---|---|
     | the `aqua-console` credential | see item 2 above — the Aqua scanner CLI needs it |
+
+    The `pipeline-prod` job is created the same way: *New Item → Pipeline →
+    name `pipeline-prod` → Definition: Pipeline script from SCM → Git
+    `https://github.com/MangoTim/pipeline-uat.git` → Branch `*/main` → **Script
+    Path: `Jenkinsfile.prod`** → Save*. Its two parameters are declared in the
+    Jenkinsfile, and are also added to the job configuration so that
+    *Build with Parameters* works from the very first run.
 
 ---
 
@@ -289,6 +368,10 @@ and the job is a *Pipeline script from SCM* whose SCM is
 `https://github.com/MangoTim/pipeline-uat.git`. The GitHub plugin matches an
 incoming push against the job's SCM, so **a push to `main` of this repository
 starts the run** — no button to press.
+
+Only `pipeline-uat` carries the trigger. `pipeline-prod` has no `triggers`
+block at all, so the plugin never starts it from a push — even though both
+jobs share the same SCM. Production moves only when a person starts it.
 
 Two things had to be in place for that to work:
 
@@ -323,10 +406,16 @@ v<major>.<minor>.<DDMMYY><NN>          e.g. v1.1.17112601
 - `major.minor` comes from the `VERSION` file in the **application** repository.
 - `DDMMYY` is the build date, pinned to Hong Kong time (the agent container
   runs UTC, the host runs America/New_York).
-- `NN` is the Jenkins build number, zero padded. It is monotonic, so a tag is
-  never reused and always maps back to exactly one build.
+- `NN` is the UAT job's build number, zero padded. It is monotonic, so a tag is
+  never reused and always maps back to exactly one **UAT** build.
 
 Full reference: `192.168.147.104:8082/hku-intranet:v1.1.17112601`
+
+**The PROD job never mints a tag.** Build numbers are per job, so
+`pipeline-uat #1` and `pipeline-prod #1` on the same day would mint the *same*
+tag — `v1.1.<DDMMYY>01` — for *different* bytes, and the second push would
+silently overwrite the first in the registry. The PROD job therefore only ever
+reads the registry: its tag and its digest come from the promotion record.
 
 ---
 
@@ -334,7 +423,8 @@ Full reference: `192.168.147.104:8082/hku-intranet:v1.1.17112601`
 
 | | |
 |---|---|
-| the pipeline | [`Jenkinsfile`](Jenkinsfile) |
+| the UAT pipeline | [`Jenkinsfile`](Jenkinsfile) |
+| the production pipeline | [`Jenkinsfile.prod`](Jenkinsfile.prod) |
 | the deployment | [`ansible/`](ansible/) — [its own README](ansible/README.md) |
 | the picture | [`docs/diagrams/pipeline/`](docs/diagrams/pipeline/) |
 | day-two notes | [`RUNBOOK.md`](RUNBOOK.md) |
@@ -342,6 +432,17 @@ Full reference: `192.168.147.104:8082/hku-intranet:v1.1.17112601`
 | the other pipeline | <https://github.com/MangoTim/pipeline-dr.git> |
 
 ## Running it by hand
+
+### The pipeline
+
+The UAT job starts on a push to `main`, or by hand from the Jenkins UI
+(*Build Now* on `pipeline-uat`). The PROD job is started by hand only
+(*Build with Parameters* on `pipeline-prod`) — `PROMOTION_ID` defaults to
+`latest`, which promotes the most recent UAT run.
+
+### The deployment
+
+To put an image on a site without running the pipeline at all:
 
 ```bash
 cd ansible

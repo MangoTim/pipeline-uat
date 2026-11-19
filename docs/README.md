@@ -29,6 +29,9 @@ for what the pipeline does, and the picture is how it is explained.
 - **The CI band reads left to right.** `code scan → build → push → image
   scan`. The code scan comes first on purpose: a hardcoded secret is caught
   before it is baked into a layer and pushed to the registry.
-- **The approval gate sits between UAT and PROD.** Both sites run the *same*
-  image tag, so the gate decides *whether* those bytes reach production, never
-  *which* bytes that is.
+- **UAT and PROD are separate Jenkins jobs.** The CI band builds and deploys
+  UAT; the approval gate lives in the *second* job, which a human starts after
+  the UAT test has passed. The band therefore ends at UAT, and the promotion
+  is a job boundary, not a step inside one build.
+- **Both sites run the *same* image tag.** So the gate decides *whether* those
+  bytes reach production, never *which* bytes that is.

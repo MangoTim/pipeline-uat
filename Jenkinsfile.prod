@@ -1,0 +1,442 @@
+// Jenkinsfile.prod — the HKU ENGG Intranet PRODUCTION job
+//
+// Load Promotion Record → Verify Promotion → Manual Approval → Deploy PROD
+//
+// ============================================================================
+// What this job is
+//
+//   The UAT half of the pipeline is the job `pipeline-uat` (Jenkinsfile). It
+//   scans the code, builds the image, pushes it to the registry, scans the
+//   image, deploys it to UAT, and then writes down WHAT it deployed.
+//
+//   THIS file is the other half. A human starts it — after the UAT test has
+//   passed — and it promotes the bytes that were tested: the same tag, the
+//   same digest, to production.
+//
+//   There is NO `triggers` block in this file, and that is deliberate. A push
+//   to the repository can never start this job. Production moves only when a
+//   person starts it and approves it.
+//
+//   The two jobs are not connected in TIME at all. The human can test UAT for
+//   an hour, overnight, over a weekend — the UAT site keeps running the
+//   candidate the whole time, and this job is started afterwards.
+//
+// ============================================================================
+// THE RULE THIS JOB MUST NEVER BREAK
+//
+//   This job NEVER runs 'Resolve Version', NEVER builds and NEVER pushes.
+//
+//   Build numbers are per job, so `pipeline-uat #1` and `pipeline-prod #1` on
+//   the same day would mint the SAME tag — v1.1.<DDMMYY>01 — for DIFFERENT
+//   bytes, and the second push would silently overwrite the first in the
+//   registry. The PROD job therefore only ever READS the registry: the tag
+//   and the digest come from the promotion record, and that record was
+//   written by the UAT build that actually deployed and tested them.
+//
+// ============================================================================
+// The promotion record
+//
+//   The controller has no parameterized-trigger, no copy-artifact and no
+//   job-dsl, so the usual `build job: 'x', parameters: [...]` is not
+//   available. Both jobs run in the same container on the same jenkins_data
+//   volume, so a FILE under JENKINS_HOME is the carrier:
+//
+//     /var/jenkins_home/promotions/intranet/uat-<UAT build number>.env
+//     /var/jenkins_home/promotions/intranet/latest.env
+//
+//   It is written by the UAT job AFTER its health and database checks pass,
+//   so a record can only ever describe an image that actually reached UAT.
+//   JENKINS_HOME is in the jenkins_data volume, so the records survive a
+//   container recreate.
+//
+//   The PROMOTION_ID parameter names the record: 'latest' (the default) or
+//   'uat-<build number>' to promote a specific earlier run.
+//
+// ============================================================================
+// The verification — three checks, before the gate opens
+//
+//   1. THE TAG STILL POINTS AT THE TESTED BYTES. The registry is asked for
+//      the manifest digest of the recorded tag, and it is compared with the
+//      recorded digest. A different digest means the tag was overwritten
+//      after the UAT test, so what would reach production is not what was
+//      tested.
+//
+//   2. UAT IS STILL RUNNING THE TESTED IMAGE. Not merely "up" — running the
+//      SAME image reference. If somebody re-ran the UAT job after the human
+//      tested it, the site still answers but the evidence is gone, and
+//      promoting then would ship bytes nobody looked at.
+//
+//   3. THE PROMOTION IS NOT STALE. A record older than MAX_AGE_HOURS
+//      (default 72) is refused, and the message names the parameter to raise.
+//
+//   Each check fails the job with a message that says what happened and what
+//   to do about it. Nothing here is a warning.
+//
+// ============================================================================
+// One-time setup
+//
+//   The job itself: New Item → Pipeline → name `pipeline-prod` →
+//   Definition: Pipeline script from SCM → Git
+//   https://github.com/MangoTim/pipeline-uat.git → Branch */main →
+//   Script Path: Jenkinsfile.prod → Save.
+//
+//   The parameters below are created by the `parameters` block on the first
+//   run, and are also declared in the job's config so that
+//   /buildWithParameters works from the very first run.
+//
+//   The PROD site needs the same treatment as UAT: its own environment file
+//   at /home/rhai/hku-intranet/env.list (mode 0600, owned by rhai) carrying
+//   DB_NAME=engg_intranet and DB_USER=engg_prod, the pipeline's SSH key in
+//   /home/rhai/.ssh/authorized_keys, python3.9, and the port 8093 open.
+//
+// ============================================================================
+
+pipeline {
+    agent any
+
+    environment {
+        // Where the registry lives and what it is called. The promotion
+        // record carries its own copy of both, and the record wins — these
+        // are only the defaults for a record that is missing them.
+        REGISTRY      = '192.168.147.104:8082'
+        IMAGE_NAME    = 'hku-intranet'
+
+        // The pipeline's own repository — the same one the UAT job uses. The
+        // deploy stage runs ${WORKSPACE}/ansible/deploy.yml out of it.
+        PIPELINE_REPO_URL = 'https://github.com/MangoTim/pipeline-uat.git'
+
+        // The controller's SSH key for Ansible. The Jenkins container's HOME
+        // is /home/server, not JENKINS_HOME, so the "~" in ansible.cfg would
+        // not resolve — the deploy stage exports ANSIBLE_PRIVATE_KEY_FILE.
+        ANSIBLE_KEY   = '/var/jenkins_home/.ssh/id_rhai108_rsa'
+
+        // Where the promotion records are. The UAT job writes them here and
+        // this job reads them from here.
+        PROMOTION_DIR = '/var/jenkins_home/promotions/intranet'
+
+        // The production site. Its own host, its own container, its own
+        // port and — the part that matters — its own database and its own
+        // database role, so a UAT session never touches production data even
+        // though both databases live on the same PostgreSQL host.
+        PROD_HOST     = '192.168.147.105'
+        PROD_PORT     = '8093'
+        PROD_DB       = 'engg_intranet'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        // 24 hours, because this build waits for a human — but NOT for the
+        // UAT test. The UAT test happens BETWEEN the two jobs; this job is
+        // only started once it has passed. The input step carries its own
+        // 12-hour timeout on top of this.
+        timeout(time: 24, unit: 'HOURS')
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        string(
+            name: 'PROMOTION_ID',
+            defaultValue: 'latest',
+            description: 'Which UAT run to promote — "latest", or "uat-<build number>".'
+        )
+        string(
+            name: 'MAX_AGE_HOURS',
+            defaultValue: '72',
+            description: 'How old a promotion record may be, in hours.'
+        )
+    }
+
+    // NO `triggers` block. On purpose. A push to the repository must never
+    // deploy to production; a human starts this job.
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: "${PIPELINE_REPO_URL}"
+            }
+        }
+
+        stage('Load Promotion Record') {
+            // Read the record the UAT job wrote. Nothing here is guessed: if
+            // the record is missing or unreadable the job stops, because a
+            // promotion without a record is a promotion of unknown bytes.
+            steps {
+                script {
+                    // PROMOTION_ID is typed by a human into the Jenkins UI, so
+                    // it is validated here — before it is ever put near a
+                    // shell. It is a FILE NAME and nothing else.
+                    def promotionId = (params.PROMOTION_ID ?: 'latest').trim()
+                    if (!(promotionId ==~ /[A-Za-z0-9._-]+/)) {
+                        error("PROMOTION_ID '${promotionId}' is not a valid record name. " +
+                              "Use 'latest', or 'uat-<build number>'.")
+                    }
+
+                    def maxAgeHours = (params.MAX_AGE_HOURS ?: '72').trim()
+                    if (!(maxAgeHours ==~ /[0-9]+/)) {
+                        error("MAX_AGE_HOURS '${maxAgeHours}' is not a number of hours.")
+                    }
+
+                    def recordPath = "${env.PROMOTION_DIR}/${promotionId}.env"
+
+                    // A missing record is the single most likely failure here,
+                    // so it gets its own message rather than a stack trace.
+                    def present = sh(script: "test -f '${recordPath}'", returnStatus: true)
+                    if (present != 0) {
+                        error("No UAT promotion has been recorded — run the `pipeline-uat` job first.\n" +
+                              "Looked for: ${recordPath}")
+                    }
+
+                    // Copy it into the workspace so it can be read with
+                    // readFile, and so the archived copy travels with this
+                    // build as evidence of what was promoted.
+                    sh(script: "cp '${recordPath}' promotion.env")
+
+                    def raw = readFile('promotion.env')
+
+                    // KEY=VALUE, one per line. '#' starts a comment.
+                    def record = [:]
+                    raw.eachLine { line ->
+                        def t = line.trim()
+                        if (t && !t.startsWith('#') && t.contains('=')) {
+                            def i = t.indexOf('=')
+                            record[t.substring(0, i).trim()] = t.substring(i + 1).trim()
+                        }
+                    }
+
+                    // The keys this job needs. A record without one of them
+                    // is not a record this job can use, and saying so is more
+                    // useful than a null further down.
+                    def keys = ['PROMOTION_ID', 'UAT_BUILD_NUMBER', 'UAT_BUILD_URL',
+                                'CREATED_AT', 'CREATED_AT_EPOCH',
+                                'FULL_IMAGE', 'IMAGE_DIGEST', 'IMAGE_VERSION',
+                                'REGISTRY', 'IMAGE_NAME',
+                                'APP_REPO', 'APP_REF', 'APP_COMMIT',
+                                'UAT_HOST', 'UAT_PORT', 'UAT_DB']
+                    keys.each { key ->
+                        if (!record[key]) {
+                            error("The promotion record ${recordPath} has no ${key} line — " +
+                                  "it is not a record this job can use.")
+                        }
+                    }
+
+                    if (!(record.CREATED_AT_EPOCH ==~ /[0-9]+/)) {
+                        error("The promotion record ${recordPath} has a CREATED_AT_EPOCH that is not a timestamp: " +
+                              "'${record.CREATED_AT_EPOCH}'.")
+                    }
+
+                    // The record is the source of truth about the artefact.
+                    // These overwrite the environment block's defaults.
+                    keys.each { key -> env[key] = record[key] }
+                    env.MAX_AGE_HOURS = maxAgeHours
+
+                    echo "Promotion record : ${recordPath}"
+                    echo "  image          : ${env.FULL_IMAGE}"
+                    echo "  digest         : ${env.IMAGE_DIGEST}"
+                    echo "  app commit     : ${env.APP_COMMIT}"
+                    echo "  recorded at    : ${env.CREATED_AT}"
+                    echo "  UAT build      : #${env.UAT_BUILD_NUMBER}  (${env.UAT_BUILD_URL})"
+                    echo "  UAT site       : http://${env.UAT_HOST}:${env.UAT_PORT}/  (database ${env.UAT_DB})"
+                }
+            }
+        }
+
+        stage('Verify Promotion') {
+            // The three checks. Each one fails the job with a message that
+            // says what happened and what to do about it.
+            steps {
+                // ---- 1. the tag still points at the tested bytes -------------
+                //
+                // The same query the UAT job made in 'Push to Registry': the
+                // manifest digest the registry serves for the recorded tag.
+                // The recorded digest was proved byte-identical to the image
+                // that was scanned, so if the two still agree, the tag still
+                // holds the tested bytes.
+                sh '''
+                    set -u
+                    MANIFEST_URL="http://${REGISTRY}/v2/${IMAGE_NAME}/manifests/${IMAGE_VERSION}"
+                    ACCEPT='Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json'
+
+                    REG_DIGEST=$(curl -s -D - -o /dev/null -H "${ACCEPT}" "${MANIFEST_URL}" | tr -d '\r' | awk '/Docker-Content-Digest/ {print $2}')
+
+                    echo "recorded digest : ${IMAGE_DIGEST}"
+                    echo "registry digest : ${REG_DIGEST}"
+
+                    if [ -z "${REG_DIGEST}" ]; then
+                        echo "BLOCKED: the registry did not return a digest for ${FULL_IMAGE}."
+                        echo "        The tag may have been deleted from the registry."
+                        exit 1
+                    fi
+
+                    if [ "${REG_DIGEST}" != "${IMAGE_DIGEST}" ]; then
+                        echo "BLOCKED: the tag no longer points at the recorded digest."
+                        echo "        recorded : ${IMAGE_DIGEST}"
+                        echo "        registry : ${REG_DIGEST}"
+                        echo "        The tag was overwritten after the UAT test, so what would"
+                        echo "        reach production is not what was tested. Re-run the UAT job."
+                        exit 1
+                    fi
+
+                    echo "Digest check OK: the tag still points at the tested bytes."
+                '''
+
+                // ---- 2. UAT is still running the tested image ----------------
+                //
+                // "UAT is up" is not enough. If somebody re-ran the UAT job
+                // after the human tested it, the site still answers — but it
+                // is answering for different bytes, and the evidence the
+                // human signed off on is gone.
+                //
+                // The image reference is read from the running container
+                // itself, over the same SSH key the deploy stages use.
+                // XDG_RUNTIME_DIR is set because rootless podman needs it and
+                // an SSH session is not a login session.
+                sh '''
+                    set -u
+                    SSH_OPTS="-i ${ANSIBLE_KEY} -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10"
+
+                    if ! curl -fsS "http://${UAT_HOST}:${UAT_PORT}/health" > /dev/null; then
+                        echo "BLOCKED: UAT is not answering at http://${UAT_HOST}:${UAT_PORT}/health."
+                        echo "        The site that was tested is gone, so there is nothing to promote."
+                        exit 1
+                    fi
+
+                    UAT_IMAGE=$(ssh ${SSH_OPTS} uat@${UAT_HOST} 'export XDG_RUNTIME_DIR=/run/user/$(id -u); podman inspect hku-intranet-uat --format "{{.ImageName}}"')
+
+                    echo "recorded image  : ${FULL_IMAGE}"
+                    echo "UAT is running  : ${UAT_IMAGE}"
+
+                    if [ -z "${UAT_IMAGE}" ]; then
+                        echo "BLOCKED: could not read the image of the running UAT container."
+                        echo "        Is hku-intranet-uat running on ${UAT_HOST}?"
+                        exit 1
+                    fi
+
+                    if [ "${UAT_IMAGE}" != "${FULL_IMAGE}" ]; then
+                        echo "BLOCKED: UAT is no longer running the tested image."
+                        echo "        recorded : ${FULL_IMAGE}"
+                        echo "        running  : ${UAT_IMAGE}"
+                        echo "        Somebody re-ran the UAT job after the test. Test the site"
+                        echo "        again, or promote the UAT run that matches what is running."
+                        exit 1
+                    fi
+
+                    echo "UAT check OK: the site is still running the tested image."
+                '''
+
+                // ---- 3. the promotion is not stale ---------------------------
+                sh '''
+                    set -u
+                    NOW=$(date +%s)
+                    AGE_HOURS=$(( (NOW - ${CREATED_AT_EPOCH}) / 3600 ))
+
+                    echo "recorded at : ${CREATED_AT}"
+                    echo "age         : ${AGE_HOURS} hours (limit ${MAX_AGE_HOURS})"
+
+                    if [ "${AGE_HOURS}" -gt "${MAX_AGE_HOURS}" ]; then
+                        echo "BLOCKED: the promotion record is ${AGE_HOURS} hours old, and the limit is ${MAX_AGE_HOURS}."
+                        echo "        Re-run the UAT job, or raise MAX_AGE_HOURS for this run if"
+                        echo "        the candidate really is the one you want to ship."
+                        exit 1
+                    fi
+
+                    echo "Age check OK: the promotion record is ${AGE_HOURS} hours old."
+                '''
+            }
+        }
+
+        stage('Manual Approval') {
+            // The human gate. Everything above has already proved that the
+            // bytes on offer are the bytes that were tested.
+            //
+            // `input` is core Jenkins — no plugin needed. Nothing clicked
+            // within the timeout aborts the build, and "Reject" aborts it too.
+            steps {
+                timeout(time: 12, unit: 'HOURS') {
+                    input message: """Promote ${FULL_IMAGE} to production?
+
+  image    : ${FULL_IMAGE}
+  digest   : ${IMAGE_DIGEST}
+  app      : ${APP_REPO} @ ${APP_COMMIT}
+  UAT      : http://${UAT_HOST}:${UAT_PORT}/   (health ok, database ${UAT_DB})
+  UAT build: #${UAT_BUILD_NUMBER}   (recorded ${CREATED_AT})
+  PROD     : http://${PROD_HOST}:${PROD_PORT}/
+
+The SAME tag and the SAME digest that passed the UAT check will be deployed to production.""",
+                          ok: 'Promote to PROD'
+                }
+            }
+        }
+
+        stage('Deploy PROD (Database & Application)') {
+            // The same role, the other target. The image is NOT rebuilt and
+            // NOT re-tagged: the site pulls the very tag that UAT is running,
+            // and that the three checks above have just verified.
+            steps {
+                sh '''
+                    set -eux
+
+                    export ANSIBLE_PRIVATE_KEY_FILE=${ANSIBLE_KEY}
+
+                    cd ${WORKSPACE}/ansible
+                    ansible-playbook -i inventory.ini deploy.yml \
+                        -e intranet_target=intranet_prod \
+                        -e intranet_image=${FULL_IMAGE}
+
+                    curl -fsS "http://${PROD_HOST}:${PROD_PORT}/health"
+                    echo ""
+                    READY=$(curl -fsS "http://${PROD_HOST}:${PROD_PORT}/api/db/connection")
+                    echo "${READY}"
+                    # The pattern is built by concatenation, not with backslash
+                    # escapes: Groovy eats the backslash in a triple-quoted
+                    # block, and dash then strips the quotes, so grep would be
+                    # handed databaseName:engg_intranet, which never matches
+                    # the quoted key in the JSON.
+                    echo "${READY}" | grep -q '"databaseName":"'"${PROD_DB}"'"' \
+                        || { echo "BLOCKED: PROD is serving the wrong database, expected ${PROD_DB}"; exit 1; }
+                    echo "${READY}" | grep -q '"isReachable":true' \
+                        || { echo "BLOCKED: PROD cannot reach its database ${PROD_DB}"; exit 1; }
+
+                    echo "PROD deployed: http://${PROD_HOST}:${PROD_PORT}/  (database ${PROD_DB})"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Promotion SUCCESS — ${env.FULL_IMAGE} is live on production"
+            emailext (
+                subject: "✅ PROD promotion #${BUILD_NUMBER} PASSED — ${env.FULL_IMAGE}",
+                body: """<h2>HKU ENGG Intranet — CI/CD — PROD promotion #${BUILD_NUMBER} PASSED</h2>
+                    <p>Image: <code>${env.FULL_IMAGE}</code></p>
+                    <p>Digest: <code>${env.IMAGE_DIGEST}</code></p>
+                    <p>Application: <code>${env.APP_REPO}</code> @ <code>${env.APP_COMMIT}</code></p>
+                    <p>UAT build: <a href=\"${env.UAT_BUILD_URL}\">#${env.UAT_BUILD_NUMBER}</a> (recorded ${env.CREATED_AT})</p>
+                    <p><b>PROD</b>: <a href=\"http://${PROD_HOST}:${PROD_PORT}/\">http://${PROD_HOST}:${PROD_PORT}/</a> (database <code>${PROD_DB}</code>)</p>
+                    <p>The same tag and the same digest that were tested on UAT — promoted unchanged.</p>
+                    <p>Console: <a href=\"${BUILD_URL}console\">build console</a><br>
+                       Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
+                """,
+                mimeType: 'text/html',
+                to: 'tim.wong@systex.com.hk'
+            )
+        }
+        failure {
+            echo "Promotion FAILED — check the failing stage above"
+            emailext (
+                subject: "❌ PROD promotion #${BUILD_NUMBER} FAILED",
+                body: """<h2>HKU ENGG Intranet — CI/CD — PROD promotion #${BUILD_NUMBER} FAILED</h2>
+                    <p>Image: <code>${env.FULL_IMAGE ?: 'unresolved'}</code></p>
+                    <p>Check the console for the failing stage. If it stopped before <b>Deploy PROD</b>, nothing was deployed to production. If it stopped inside <b>Deploy PROD</b>, check the Ansible output and the site itself.</p>
+                    <p>Console: <a href=\"${BUILD_URL}console\">build console</a><br>
+                       Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
+                """,
+                mimeType: 'text/html',
+                attachLog: true,
+                to: 'tim.wong@systex.com.hk'
+            )
+        }
+    }
+}

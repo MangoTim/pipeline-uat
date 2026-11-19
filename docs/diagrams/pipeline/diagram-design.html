@@ -127,6 +127,11 @@
   .env-host { display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .1px;
               font-family: Consolas, "DejaVu Sans Mono", monospace; color: #FFFFFF;
               background: var(--blue); border-radius: 4px; padding: 1px 7px; margin-left: 8px; }
+  /* ---- which Jenkins job owns this box ---- */
+  .jobpill { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .2px;
+             font-family: Consolas, "DejaVu Sans Mono", monospace; color: var(--grey);
+             background: #F4F4F4; border: 1px solid var(--line);
+             border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
 
   .env-chips { display: flex; gap: 8px; align-items: stretch; flex: 1 1 auto; }
   .echip { flex: 1 1 0; background: #FFFFFF; border: 1px solid var(--line);
@@ -167,6 +172,11 @@
               box-shadow: 0 1px 3px rgba(0,0,0,.07); }
   .approval-h { font-size: 11.5px; font-weight: 700; color: var(--ink); text-align: center;
                 border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  /* the job the approval lives in — the gate IS a job boundary */
+  .jobtag { font-size: 9px; font-weight: 700; letter-spacing: .4px;
+            font-family: Consolas, "DejaVu Sans Mono", monospace; color: #FFFFFF;
+            background: var(--grey); border-radius: 4px; padding: 2px 0;
+            margin: 8px 0 0 0; text-align: center; }
   .approval p { font-size: 10.5px; color: var(--grey); margin: 9px 0 10px 0;
                 line-height: 1.4; text-align: center; }
   .dotted { border-top: 1px dotted #AAAAAA; margin-bottom: 10px; }
@@ -252,11 +262,12 @@
         <div class="band-b">
           <div class="env-row">
 
-            <div class="env uat"><div class="hookh"></div><div class="env-t">UAT Environment<span class="env-host">192.168.147.104 &middot; with CI</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
+            <div class="env uat"><div class="hookh"></div><div class="env-t">UAT Environment<span class="env-host">192.168.147.104 &middot; with CI</span><span class="jobpill">job pipeline-uat</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
               <div class="approval-h">Manual Approval Task</div>
+              <div class="jobtag">JOB &middot; pipeline-prod</div>
               <p>Promote the same image to production?</p>
               <div class="dotted"></div>
               <div class="btn reject">Reject</div>
@@ -265,12 +276,18 @@
 
             <div class="greenarrow"><div class="line"></div></div>
 
-            <div class="env prod"><div class="callout" style="right:-15px; top:-15px;">6</div><div class="env-t">Production Environment<span class="env-host">192.168.147.105</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
+            <div class="env prod"><div class="callout" style="right:-15px; top:-15px;">6</div><div class="env-t">Production Environment<span class="env-host">192.168.147.105</span><span class="jobpill">job pipeline-prod</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
 
           </div>
 
           <!-- ---------- the data tier, under both application tiers ---------- -->
           <div class="datarow"><div class="dbcard"><div class="callout" style="left:-15px; top:-15px;">3</div><div class="db-head"><span class="wordmark"><i>PSQL</i>PostgreSQL</span><span class="hostpill db">192.168.147.103 &middot; the data tier</span></div><div class="db-body"><div class="dbdb"><b>engg_intranet_uat</b><span>role engg_uat &middot; used by UAT on .104</span></div><div class="dbsep"></div><div class="dbdb"><b>engg_intranet</b><span>role engg_prod &middot; used by PROD on .105</span></div><div class="dbnote">one host &middot; one instance &middot; a role and a grant each,<br>so UAT cannot open the PROD database<br>the intranet DR site joins this host later</div></div></div></div>
+
+          <div class="band-note">UAT and PROD are <b>two separate Jenkins jobs</b>
+            &mdash; the promotion is a job boundary, not a step inside one build.
+            The UAT job writes a promotion record; the PROD job reads it, and a
+            human approves before it deploys. A push to GitHub can never reach
+            production.</div>
         </div>
       </div>
 
@@ -280,6 +297,7 @@
           <span class="brands"><span class="brand github">GITHUB</span></span>
           <span class="band-title">CI (Continuous Integration)
             <span class="hostpill">192.168.147.104</span>
+            <span class="jobpill">job pipeline-uat</span>
           </span>
         </div>
         <div class="band-b">
@@ -292,6 +310,6 @@
     </div>
   </div>
 
-  <div class="legend"><span><i>1</i>GitHub &rarr; Jenkins</span><span><i>2</i>the webhook starts the run</span><span><i>3</i>the data tier &mdash; one PostgreSQL host, .103</span><span><i>4</i>manual approval</span><span><i>5</i>one private repo, pinned</span><span><i>6</i>PROD live</span></div>
+  <div class="legend"><span><i>1</i>GitHub &rarr; Jenkins</span><span><i>2</i>the webhook starts the run</span><span><i>3</i>the data tier &mdash; one PostgreSQL host, .103</span><span><i>4</i>the approval gate &mdash; in the PROD job</span><span><i>5</i>one private repo, pinned</span><span><i>6</i>PROD live</span></div>
 
 </div></body></html>

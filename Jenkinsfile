@@ -1,7 +1,11 @@
-// Jenkinsfile — the HKU ENGG Intranet UAT → APPROVAL → PROD pipeline
+// Jenkinsfile — the HKU ENGG Intranet UAT pipeline (the job `pipeline-uat`)
 //
 // Code scan → build → push to the registry → image scan → deploy & verify
-// → deploy UAT → MANUAL APPROVAL → deploy PROD
+// → deploy UAT → record the promotion
+//
+// The production half is a SECOND job — Jenkinsfile.prod, the job
+// `pipeline-prod` — which a human starts AFTER the UAT test has passed. This
+// file never touches production. See "The two jobs" below.
 //
 // ============================================================================
 // What this repository is
@@ -68,12 +72,13 @@
 //        the OS CVE backlog is triaged; today the policy is malware+root only,
 //        so the Aqua image scan does NOT gate on CVEs.)
 //
-//   4. Pipeline job configuration
+//   4. Pipeline job configuration — TWO jobs, one repository
 //        Definition:  Pipeline script from SCM
 //        SCM:         Git | https://github.com/MangoTim/pipeline-uat.git
 //        Branch:      */main
-//        Script Path: Jenkinsfile
-//        (This repository IS the pipeline — the Jenkinsfile, the Ansible
+//        Script Path: Jenkinsfile              (the job `pipeline-uat`)
+//        Script Path: Jenkinsfile.prod         (the job `pipeline-prod`)
+//        (This repository IS the pipeline — the Jenkinsfiles, the Ansible
 //         roles and the setup script are all committed here, and the deploy
 //         stages run ${WORKSPACE}/ansible/deploy.yml from it.)
 //
@@ -111,7 +116,7 @@
 //        Fix on the host:  podman network reload
 //        (or recreate the aqua-web / aqua-gateway containers).
 //
-//   8. UAT / PROD deployment prerequisites (needed by the last three stages)
+//   8. UAT / PROD deployment prerequisites (needed by the deploy stages)
 //        a) The environment file on each host, owned by the deploy user:
 //             /home/uat/hku-intranet/env.list     (UAT,  mode 0600)
 //             /home/rhai/hku-intranet/env.list    (PROD, mode 0600)
@@ -150,19 +155,41 @@
 //        Full walkthrough: ansible/README.md
 //
 // ---------------------------------------------------------------------------
-// The UAT -> APPROVAL -> PROD path
+// The two jobs
+//
+//   This file is the UAT half. The production half is a SECOND job —
+//   `pipeline-prod`, running Jenkinsfile.prod from this same repository.
+//
+//     JOB pipeline-uat  (this file)
+//        Checkout -> Fetch App Source -> Resolve Version -> Code Scan ->
+//        Build Image -> Push to Registry -> Image Scan -> Deploy & Verify ->
+//        Deploy UAT -> Record Promotion
+//        A push to main starts it. It never touches production.
+//
+//     JOB pipeline-prod  (Jenkinsfile.prod)
+//        Checkout -> Load Promotion Record -> Verify Promotion ->
+//        Manual Approval -> Deploy PROD
+//        NO triggers block — a push can never start it. A human starts it,
+//        after the UAT test has passed.
 //
 //   'Deploy & Verify' boots the image once ON THE CI HOST to prove it starts.
-//   Nothing is deployed from there. The last three stages put the image on a
-//   site:
+//   Nothing is deployed from there. The last two stages put the image on UAT
+//   and then describe it for the promotion:
 //
 //     Deploy UAT (Database & Application)
 //        ansible -> .104:8097, its own database engg_intranet_uat, and the
 //        readiness check proves which database it is connected to
-//     Manual Approval
-//        a human decides whether PRODUCTION gets it
-//     Deploy PROD (Database & Application)
-//        ansible -> .105:8093, database engg_intranet
+//     Record Promotion
+//        writes down WHAT was deployed — image, digest, app commit, UAT
+//        endpoint — so the PROD job can promote those exact bytes later
+//
+//   The record is the carrier across the job boundary. The controller has no
+//   parameterized-trigger, no copy-artifact and no job-dsl, so the usual
+//   `build job: 'x', parameters: [...]` is not available — but both jobs run
+//   in the same container on the same jenkins_data volume, so a FILE under
+//   JENKINS_HOME carries the evidence from one job to the other. The PROD job
+//   is TOLD which bytes were tested; it cannot disagree with the UAT job
+//   about it.
 //
 //   UAT and PROD run the SAME TAG — the one this build pushed and scanned.
 //   The approval therefore decides WHETHER those exact bytes reach
@@ -174,9 +201,10 @@
 //   environment file and DATABASE. The separate database is what makes UAT a
 //   separate environment and not a second view of production.
 //
-//   The approval is a plain Jenkins `input` step — no plugin needed. The
-//   build waits for a human, so 'options.timeout' is raised to 60 minutes and
-//   the input step carries its own 30-minute timeout.
+//   The approval is a plain Jenkins `input` step — no plugin needed. It lives
+//   in the PROD job now, so the two jobs are not connected in TIME at all:
+//   the human can test UAT for an hour, overnight, whatever, and then start
+//   the PROD job with the record of what was tested.
 //
 // ---------------------------------------------------------------------------
 // Why a separate code-scan stage?
@@ -249,11 +277,18 @@
 //                 ones.
 //   DDMMYY       the build date, pinned to Hong Kong time (the agent
 //                 container runs UTC, the host runs America/New_York).
-//   NN           the Jenkins build number, zero padded to two digits. It is
+//   NN           the UAT job's build number, zero padded to two digits. It is
 //                 monotonic, so a tag is never reused and always maps back to
-//                 exactly one build.
+//                 exactly one UAT build.
 //
 //   Full reference: 192.168.147.104:8082/hku-intranet:v1.1.28102601
+//
+//   THE PROD JOB NEVER MINTS A TAG. Build numbers are per job, so
+//   `pipeline-uat #1` and `pipeline-prod #1` on the same day would mint the
+//   SAME tag — v1.1.<DDMMYY>01 — for DIFFERENT bytes, and the second push
+//   would silently overwrite the first in the registry. The PROD job only
+//   ever READS the registry: its tag and its digest come from the promotion
+//   record. See Jenkinsfile.prod.
 //
 // ---------------------------------------------------------------------------
 // What "Image Is Compliant" does and does not mean
@@ -414,13 +449,16 @@ pipeline {
         // own: no UAT or PROD data is touched, and it is removed afterwards.
         VERIFY_DB_PORT = '55432'
 
-        // The two deployment sites — TWO HOSTS, not two containers on one:
+        // The UAT site — ONE HOST, one container, one database:
         //   UAT   192.168.147.104  (the intranet container)         user uat
-        //   PROD  192.168.147.105  (the live site)                  user rhai
         //   DB    192.168.147.103  (the PostgreSQL server — one instance
         //                           holding one database and one role per
         //                           environment; the intranet DR site joins
         //                           this host later)
+        //
+        // The PROD site is the OTHER host (.105, user rhai, database
+        // engg_intranet) and its variables live in the PROD job —
+        // Jenkinsfile.prod. This job never deploys there.
         //
         // Each site gets its own port and — the part that matters — its OWN
         // DATABASE and its OWN database role, so a UAT session never touches
@@ -428,9 +466,6 @@ pipeline {
         UAT_HOST      = '192.168.147.104'
         UAT_PORT      = '8097'
         UAT_DB        = 'engg_intranet_uat'
-        PROD_HOST     = '192.168.147.105'
-        PROD_PORT     = '8093'
-        PROD_DB       = 'engg_intranet'
 
         // The pipeline's own repository — the one this Jenkinsfile lives in.
         // The Checkout stage clones it; the deploy stages read the Ansible
@@ -459,6 +494,13 @@ pipeline {
         // not resolve — the deploy stages export ANSIBLE_PRIVATE_KEY_FILE.
         ANSIBLE_KEY   = '/var/jenkins_home/.ssh/id_rhai108_rsa'
 
+        // Where the promotion record is written. JENKINS_HOME lives in the
+        // jenkins_data volume, so a record survives a container recreate —
+        // the same lifetime as the jobs and the credentials. The PROD job
+        // reads it from here, which is what carries the tested bytes across
+        // the job boundary.
+        PROMOTION_DIR = '/var/jenkins_home/promotions/intranet'
+
         // IMAGE_VERSION / FULL_IMAGE / SCAN_IMAGE are resolved at run time by
         // the 'Resolve Version' stage — they depend on the VERSION file and
         // on the build date, neither of which the environment block can read.
@@ -466,8 +508,10 @@ pipeline {
 
     options {
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        // 60 minutes, not 25: the build now waits at the approval gate for a
-        // human. The input step has its own 30-minute timeout on top of this.
+        // 60 minutes of MACHINE work — the scans, the build, the push and the
+        // UAT deployment. This job no longer waits for a human: the approval
+        // gate lives in the pipeline-prod job, so the human test happens
+        // BETWEEN two jobs rather than inside one suspended build.
         timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
     }
@@ -555,12 +599,19 @@ pipeline {
             //   DDMMYY       the build date, pinned to Hong Kong time so the
             //                 tag does not depend on where the agent runs (the
             //                 agent container is UTC, the host is New York).
-            //   NN           the Jenkins build number, zero padded to two
+            //   NN           the UAT job's build number, zero padded to two
             //                 digits. It is monotonic, so a tag is never reused
-            //                 and always maps back to exactly one build.
+            //                 and always maps back to exactly one UAT build.
             //
             // Examples: v1.1.28102601, v1.1.28102602, then v1.2.28102603
             // after the version line is bumped.
+            //
+            // This stage runs in the UAT job ONLY. The PROD job must never
+            // mint a tag: build numbers are per job, so `pipeline-uat #1` and
+            // `pipeline-prod #1` on the same day would mint the SAME tag for
+            // different bytes, and the second push would silently overwrite
+            // the first in the registry. The PROD job only READS the
+            // registry — its tag comes from the promotion record.
             steps {
                 script {
                     def base = sh(script: "tr -d ' \\n' < app/VERSION", returnStdout: true).trim()
@@ -1283,57 +1334,77 @@ pipeline {
             }
         }
 
-        stage('Manual Approval') {
-            // The human gate. UAT is up and checked; a human decides whether
-            // PRODUCTION gets it.
+        stage('Record Promotion') {
+            // The last stage of this job. It writes down WHAT was deployed to
+            // UAT, so the pipeline-prod job can promote those exact bytes
+            // later — an hour later, overnight, whenever the human has
+            // finished testing.
             //
-            // `input` is core Jenkins — no plugin needed. Nothing clicked
-            // within the timeout aborts the build, and "Reject" aborts it too.
-            // The tag and the digest shown here are the ones the UAT site is
-            // running right now, so the decision is about THOSE bytes.
+            // The record is a KEY=VALUE file under JENKINS_HOME. That
+            // directory is in the jenkins_data volume, so it survives a
+            // container recreate, and both jobs run in the same container —
+            // which is what makes a file a working carrier between them.
+            // (The controller has no parameterized-trigger, no copy-artifact
+            // and no job-dsl, so the usual `build job: ..., parameters: ...`
+            // is not available.)
+            //
+            // It is written AFTER the UAT health and database checks pass, so
+            // a record can only ever describe an image that actually reached
+            // UAT and was actually running there.
             steps {
-                timeout(time: 30, unit: 'MINUTES') {
-                    input message: """Promote ${FULL_IMAGE} to production?
+                script {
+                    def promotionId = "uat-${BUILD_NUMBER}"
 
-  image    : ${FULL_IMAGE}
-  digest   : ${IMAGE_DIGEST}
-  app      : ${APP_REPO} @ ${APP_COMMIT}
-  UAT      : http://${UAT_HOST}:${UAT_PORT}/   (health ok, database ${UAT_DB})
-  PROD     : http://${PROD_HOST}:${PROD_PORT}/
+                    // The date is pinned to Hong Kong time, like the tag's
+                    // DDMMYY part: the agent container runs UTC and the host
+                    // runs America/New_York, so an unpinned date is wrong.
+                    def createdAt = sh(
+                        script: "TZ=Asia/Hong_Kong date --iso-8601=seconds",
+                        returnStdout: true).trim()
+                    def createdAtEpoch = sh(
+                        script: "date +%s",
+                        returnStdout: true).trim()
 
-The SAME tag and the SAME digest that just passed the UAT check will be deployed to production.""",
-                          ok: 'Promote to PROD'
+                    // No shell is involved in writing this — Groovy builds the
+                    // text, so nothing can be mangled by quoting and the
+                    // values cannot be interpreted as commands.
+                    def record = """\
+# written by the pipeline-uat job (UAT build #${BUILD_NUMBER})
+PROMOTION_ID=${promotionId}
+UAT_BUILD_NUMBER=${BUILD_NUMBER}
+UAT_BUILD_URL=${BUILD_URL}
+CREATED_AT=${createdAt}
+CREATED_AT_EPOCH=${createdAtEpoch}
+FULL_IMAGE=${env.FULL_IMAGE}
+IMAGE_DIGEST=${env.IMAGE_DIGEST}
+IMAGE_VERSION=${env.IMAGE_VERSION}
+REGISTRY=${env.REGISTRY}
+IMAGE_NAME=${env.IMAGE_NAME}
+APP_REPO=${env.APP_REPO}
+APP_REF=${env.APP_REF}
+APP_COMMIT=${env.APP_COMMIT}
+UAT_HOST=${env.UAT_HOST}
+UAT_PORT=${env.UAT_PORT}
+UAT_DB=${env.UAT_DB}
+"""
+                    writeFile file: 'promotion.env', text: record
+
+                    env.PROMOTION_ID = promotionId
+                    env.PROMOTION_FILE = "${promotionId}.env"
                 }
-            }
-        }
-
-        stage('Deploy PROD (Database & Application)') {
-            // The same role, the other target. The image is NOT rebuilt: the
-            // site pulls the very tag that UAT is running.
-            steps {
                 sh '''
                     set -eux
-
-                    export ANSIBLE_PRIVATE_KEY_FILE=${ANSIBLE_KEY}
-
-                    cd ${WORKSPACE}/ansible
-                    ansible-playbook -i inventory.ini deploy.yml \
-                        -e intranet_target=intranet_prod \
-                        -e intranet_image=${FULL_IMAGE}
-
-                    curl -fsS "http://${PROD_HOST}:${PROD_PORT}/health"
-                    echo ""
-                    READY=$(curl -fsS "http://${PROD_HOST}:${PROD_PORT}/api/db/connection")
-                    echo "${READY}"
-                    # Same construction as the UAT check above, and for the
-                    # same reason.
-                    echo "${READY}" | grep -q '"databaseName":"'"${PROD_DB}"'"' \
-                        || { echo "BLOCKED: PROD is serving the wrong database, expected ${PROD_DB}"; exit 1; }
-                    echo "${READY}" | grep -q '"isReachable":true' \
-                        || { echo "BLOCKED: PROD cannot reach its database ${PROD_DB}"; exit 1; }
-
-                    echo "PROD deployed: http://${PROD_HOST}:${PROD_PORT}/  (database ${PROD_DB})"
+                    mkdir -p ${PROMOTION_DIR}
+                    cp promotion.env ${PROMOTION_DIR}/${PROMOTION_ID}.env
+                    cp promotion.env ${PROMOTION_DIR}/latest.env
+                    echo "--- the promotion record ---"
+                    cat ${PROMOTION_DIR}/latest.env
                 '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'promotion.env', allowEmptyArchive: true
+                }
             }
         }
     }
@@ -1386,18 +1457,19 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
             '''
         }
         success {
-            echo "Pipeline SUCCESS — ${env.FULL_IMAGE} was scanned, checked in UAT, approved and deployed to PROD"
+            echo "Pipeline SUCCESS — ${env.FULL_IMAGE} was scanned and is live on UAT. Nothing was deployed to production."
             emailext (
-                subject: "✅ Build #${BUILD_NUMBER} PASSED — ${env.FULL_IMAGE}",
-                body: """<h2>HKU ENGG Intranet — CI/CD — Build #${BUILD_NUMBER} PASSED</h2>
+                subject: "✅ UAT build #${BUILD_NUMBER} PASSED — ${env.FULL_IMAGE} is live on UAT",
+                body: """<h2>HKU ENGG Intranet — CI/CD — UAT Build #${BUILD_NUMBER} PASSED</h2>
                     <p>Image: <code>${env.FULL_IMAGE}</code></p>
+                    <p>Digest: <code>${env.IMAGE_DIGEST}</code></p>
                     <p>Application: <code>${APP_REPO}</code> @ <code>${APP_COMMIT}</code></p>
                     <p>Aqua image scan: <b>Image Is Compliant</b> (malware, root user, sensitive data)</p>
                     <p>Code scan: no secrets in the source tree, no HIGH/CRITICAL dependency advisories, no CRITICAL OS CVEs</p>
                     <p>Deploy verify: /health + SPA root ok on <code>127.0.0.1:${VERIFY_PORT}</code></p>
-                    <p><b>UAT</b>: <a href=\"http://${UAT_HOST}:${UAT_PORT}/\">http://${UAT_HOST}:${UAT_PORT}/</a> (database <code>${UAT_DB}</code>) — approved for production</p>
-                    <p><b>PROD</b>: <a href=\"http://${PROD_HOST}:${PROD_PORT}/\">http://${PROD_HOST}:${PROD_PORT}/</a> (database <code>${PROD_DB}</code>)</p>
-                    <p>Same tag and digest in both — UAT and PROD run the identical image.</p>
+                    <p><b>UAT</b>: <a href=\"http://${UAT_HOST}:${UAT_PORT}/\">http://${UAT_HOST}:${UAT_PORT}/</a> (database <code>${UAT_DB}</code>)</p>
+                    <p><b>PROD</b>: not touched. This job never deploys to production.</p>
+                    <p><b>Next step</b>: test UAT. When it passes, start the <code>pipeline-prod</code> job to promote these exact bytes — the promotion record is <code>${env.PROMOTION_FILE}</code>.</p>
                     <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
@@ -1409,10 +1481,10 @@ The SAME tag and the SAME digest that just passed the UAT check will be deployed
         failure {
             echo "Pipeline FAILED — check the failing stage above for the blocking finding"
             emailext (
-                subject: "❌ Build #${BUILD_NUMBER} FAILED",
-                body: """<h2>HKU ENGG Intranet — CI/CD — Build #${BUILD_NUMBER} FAILED</h2>
+                subject: "❌ UAT build #${BUILD_NUMBER} FAILED",
+                body: """<h2>HKU ENGG Intranet — CI/CD — UAT Build #${BUILD_NUMBER} FAILED</h2>
                     <p>Image: <code>${env.FULL_IMAGE ?: 'unresolved'}</code></p>
-                    <p>Check the console for the failure stage. If it stopped at <b>Manual Approval</b>, nothing was deployed to production.</p>
+                    <p>Check the console for the failure stage. This job only ever touches UAT, so nothing was deployed to UAT and nothing was deployed to production.</p>
                     <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>

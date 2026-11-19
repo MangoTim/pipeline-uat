@@ -16,6 +16,10 @@ It is the shape the HKU ENGG Intranet pipeline uses: GitHub is the SCM,
 Jenkins builds and scans the image once, the registry holds it, UAT gets it
 first, and a human approves before it goes to production.
 
+The pipeline is TWO Jenkins jobs. `pipeline-uat` builds, scans and deploys
+UAT; `pipeline-prod` approves and deploys production. The picture says so,
+because the gate is a job boundary and not a step inside one build.
+
     python docs/diagrams/pipeline/build_design.py          # render everything
     python docs/diagrams/pipeline/build_design.py --html   # HTML only
 """
@@ -181,6 +185,11 @@ CSS = Template("""
   .env-host { display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .1px;
               font-family: Consolas, "DejaVu Sans Mono", monospace; color: #FFFFFF;
               background: var(--blue); border-radius: 4px; padding: 1px 7px; margin-left: 8px; }
+  /* ---- which Jenkins job owns this box ---- */
+  .jobpill { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .2px;
+             font-family: Consolas, "DejaVu Sans Mono", monospace; color: var(--grey);
+             background: #F4F4F4; border: 1px solid var(--line);
+             border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
 
   .env-chips { display: flex; gap: 8px; align-items: stretch; flex: 1 1 auto; }
   .echip { flex: 1 1 0; background: #FFFFFF; border: 1px solid var(--line);
@@ -221,6 +230,11 @@ CSS = Template("""
               box-shadow: 0 1px 3px rgba(0,0,0,.07); }
   .approval-h { font-size: 11.5px; font-weight: 700; color: var(--ink); text-align: center;
                 border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  /* the job the approval lives in — the gate IS a job boundary */
+  .jobtag { font-size: 9px; font-weight: 700; letter-spacing: .4px;
+            font-family: Consolas, "DejaVu Sans Mono", monospace; color: #FFFFFF;
+            background: var(--grey); border-radius: 4px; padding: 2px 0;
+            margin: 8px 0 0 0; text-align: center; }
   .approval p { font-size: 10.5px; color: var(--grey); margin: 9px 0 10px 0;
                 line-height: 1.4; text-align: center; }
   .dotted { border-top: 1px dotted #AAAAAA; margin-bottom: 10px; }
@@ -272,7 +286,7 @@ LEGEND = [
     (1, "GitHub &rarr; Jenkins"),
     (2, "the webhook starts the run"),
     (3, "the data tier &mdash; one PostgreSQL host, .103"),
-    (4, "manual approval"),
+    (4, "the approval gate &mdash; in the PROD job"),
     (5, "one private repo, pinned"),
     (6, "PROD live"),
 ]
@@ -292,15 +306,17 @@ ENV_CHIPS = {
 
 
 def env_box(kind: str, title: str, num: int = 0, extra: str = "",
-            num_style: str = "left:-16px; top:-16px;", host: str = "") -> str:
+            num_style: str = "left:-16px; top:-16px;", host: str = "",
+            job: str = "") -> str:
     chips = "".join(
         (f'<div class="echip">{t}</div>'
          + ('<div class="earrow">&rarr;</div>' if i < len(ENV_CHIPS[kind]) - 1 else ""))
         for i, t in enumerate(ENV_CHIPS[kind]))
     callout = (f'<div class="callout" style="{num_style}">{num}</div>' if num else "")
     hostpill = f'<span class="env-host">{host}</span>' if host else ""
+    jobpill = f'<span class="jobpill">job {job}</span>' if job else ""
     return (f'<div class="env {kind}">{callout}{extra}'
-            f'<div class="env-t">{title}{hostpill}</div>'
+            f'<div class="env-t">{title}{hostpill}{jobpill}</div>'
             f'<div class="env-chips">{chips}</div></div>')
 
 
@@ -383,11 +399,13 @@ def build_html() -> str:
           <div class="env-row">
 
             {env_box("uat", "UAT Environment", 0, HOOKIN,
-                     host="192.168.147.104 &middot; with CI")}
+                     host="192.168.147.104 &middot; with CI",
+                     job="pipeline-uat")}
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
               <div class="approval-h">Manual Approval Task</div>
+              <div class="jobtag">JOB &middot; pipeline-prod</div>
               <p>Promote the same image to production?</p>
               <div class="dotted"></div>
               <div class="btn reject">Reject</div>
@@ -398,12 +416,19 @@ def build_html() -> str:
 
             {env_box("prod", "Production Environment", 6,
                      num_style="right:-15px; top:-15px;",
-                     host="192.168.147.105")}
+                     host="192.168.147.105",
+                     job="pipeline-prod")}
 
           </div>
 
           <!-- ---------- the data tier, under both application tiers ---------- -->
           <div class="datarow">{DATATIER}</div>
+
+          <div class="band-note">UAT and PROD are <b>two separate Jenkins jobs</b>
+            &mdash; the promotion is a job boundary, not a step inside one build.
+            The UAT job writes a promotion record; the PROD job reads it, and a
+            human approves before it deploys. A push to GitHub can never reach
+            production.</div>
         </div>
       </div>
 
@@ -413,6 +438,7 @@ def build_html() -> str:
           <span class="brands"><span class="brand github">GITHUB</span></span>
           <span class="band-title">CI (Continuous Integration)
             <span class="hostpill">192.168.147.104</span>
+            <span class="jobpill">job pipeline-uat</span>
           </span>
         </div>
         <div class="band-b">
