@@ -204,12 +204,19 @@ pipeline {
                     // CpsClosure2.call" — before it reaches a single check.
                     // A plain loop over the split lines has no closure to
                     // dispatch, so it cannot go wrong that way.
-                    def record = [:]
+                    //
+                    // The map is filled with `put`, not with `record[k] = v`.
+                    // The subscript form compiles to
+                    // DefaultGroovyMethods.putAt(Object, String, Object),
+                    // and the sandbox does not allow that one — it rejects the
+                    // build with RejectedAccessException. `put` is a plain
+                    // java.util.Map.put and is allowed.
+                    Map<String, String> record = [:]
                     for (String line : raw.split('\n')) {
                         def t = line.trim()
                         if (t && !t.startsWith('#') && t.contains('=')) {
                             def i = t.indexOf('=')
-                            record[t.substring(0, i).trim()] = t.substring(i + 1).trim()
+                            record.put(t.substring(0, i).trim(), t.substring(i + 1).trim())
                         }
                     }
 
@@ -236,7 +243,13 @@ pipeline {
 
                     // The record is the source of truth about the artefact.
                     // These overwrite the environment block's defaults.
-                    for (String key : keys) { env[key] = record[key] }
+                    //
+                    // `env."${key}" = v`, NOT `env[key] = v`: the subscript form
+                    // is rejected by the sandbox too, and so is `env.put(k, v)`
+                    // — the property form with a dynamic name is the one the
+                    // sandbox lets through, and it sets the variable for the
+                    // shell steps that follow as well.
+                    for (String key : keys) { env."${key}" = record[key] }
                     env.MAX_AGE_HOURS = maxAgeHours
 
                     echo "Promotion record : ${recordPath}"
