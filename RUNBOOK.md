@@ -58,6 +58,36 @@ that is the whole point of the gate.
 
 **A push never starts the PROD job.** It has no trigger at all.
 
+### The notification
+
+Both jobs end with an `emailext` step, so the promotion is announced by mail:
+`✅ PROD promotion #<n> PASSED` with the image, the digest and the UAT build
+it came from, and `❌ PROD promotion #<n> FAILED` with the console link.
+
+The controller on `.104` has **no mail relay of its own** (and no entitlement
+to install one), so the mail account is pointed straight at the corporate MX:
+
+| Manage Jenkins → Extended E-mail Notification | |
+|---|---|
+| SMTP server | `systex.com.hk` |
+| SMTP port | `25` |
+| credentials | **none** — the MX accepts mail from the lab without authentication |
+| SSL / TLS | off |
+
+The **from** address must look like a real address or the MX refuses it with
+`501 Bad sender address syntax`; the plugin builds it from the admin address
+and the `@systex.com.hk` suffix, so **Manage Jenkins → System → Jenkins
+Location → System Admin E-mail address** must be `tim.wong@systex.com.hk`.
+
+A healthy send looks like this in the build log:
+
+```
+Sending email to: tim.wong@systex.com.hk
+MAIL FROM:<tim.wong@systex.com.hk>
+250 2.0.0 Ok: queued as 46A8A11FB0B
+DEBUG SMTP: message successfully delivered to mail server
+```
+
 ## 3. Checking a site
 
 ```bash
@@ -155,6 +185,9 @@ only.
 | `the tag no longer points at the recorded digest` | somebody re-pushed that tag after the UAT test | re-run the UAT job, then promote the new record |
 | `UAT is no longer running the tested image` | the UAT job was re-run after the human tested it | test UAT again, then promote the newest record |
 | `Raw Scan Results directory ... has only N GB of storage` | the Aqua console's disk is full | `df -h` on `.104`, remove old tarballs, restart `aqua-web` |
+| `SMTP connection error while sending email` in the post stage | the mail account points at `127.0.0.1`, and `.104` has no relay | set the SMTP server to `systex.com.hk`, port `25`, no credentials — see *The notification* in section 2 |
+| `501 Bad sender address syntax` | the from address is not a real address | set *Jenkins Location → System Admin E-mail address* to `tim.wong@systex.com.hk` |
+| `535 ... authentication failed` | the mail account is trying to authenticate | clear the credentials on the mail account — the MX accepts the lab without authentication |
 
 ## 7. The container recreated — what to redo
 
