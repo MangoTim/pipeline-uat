@@ -74,8 +74,7 @@
 //
 //   4. Pipeline job configuration — TWO jobs, one repository
 //        Definition:  Pipeline script from SCM
-//        SCM:         Git | git@192.168.147.52:hku/pipeline_uat.git
-//                    (credentials: gitlab-ssh)
+//        SCM:         Git | https://github.com/MangoTim/pipeline-uat.git
 //        Branch:      */main
 //        Script Path: Jenkinsfile              (the job `pipeline-uat`)
 //        Script Path: Jenkinsfile.prod         (the job `pipeline-prod`)
@@ -471,13 +470,7 @@ pipeline {
         // The pipeline's own repository — the one this Jenkinsfile lives in.
         // The Checkout stage clones it; the deploy stages read the Ansible
         // roles out of it.
-        //
-        // It is the PRIVATE project hku/pipeline_uat on the GitLab server at
-        // 192.168.147.52, so the clone goes over SSH with the credential
-        // 'gitlab-ssh'. The GitHub copy (MangoTim/pipeline-uat) is kept as the
-        // backup, not as the source of the build.
-        PIPELINE_REPO_URL = 'git@192.168.147.52:hku/pipeline_uat.git'
-        PIPELINE_CREDENTIALS = 'gitlab-ssh'
+        PIPELINE_REPO_URL = 'https://github.com/MangoTim/pipeline-uat.git'
 
         // The APPLICATION repository. The 'Fetch App Source' stage clones it
         // into ${WORKSPACE}/app, and everything after that — the version, the
@@ -491,14 +484,7 @@ pipeline {
         //
         // Move it forward deliberately: that is the record of what was
         // promoted to PROD.
-        // The application now lives on the GitLab server too, as the project
-        // hku_intranet. It is PUBLIC at the moment, so this stage clones it
-        // anonymously over HTTP and needs no credential. The moment the
-        // project is made PRIVATE, this stage has to change as well: it runs
-        // a plain 'git fetch', so the key would have to be offered to ssh
-        // from inside the controller (an ssh config entry in the container),
-        // not through a Jenkins credential.
-        APP_REPO = 'http://192.168.147.52/hku/hku_intranet.git'
+        APP_REPO = 'https://github.com/MangoTim/hku-calendar.git'
         APP_REF  = 'v1.1.0'
 
         // The controller's SSH key for Ansible. The path is relative to the
@@ -531,20 +517,16 @@ pipeline {
     }
 
     triggers {
-        // A push to main of THIS repository starts the pipeline.
+        // The GitHub plugin's push trigger: when the APPLICATION repository
+        // receives a push, GitHub delivers a webhook to Jenkins and this
+        // pipeline starts. The trigger only LISTENS — the hook on the GitHub
+        // side has to be created as well, pointing at this Jenkins' webhook
+        // endpoint.
         //
-        // It used to be the GitHub plugin's githubPush(), which needed a
-        // GitHub server configured in Jenkins and a webhook pointing at this
-        // controller. The repository now lives on GitLab, where the
-        // controller has no plugin at all, and the old webhook hook pointed
-        // at an ephemeral Cloudflare tunnel hostname — so it was dead anyway.
-        //
-        // pollSCM is CORE: Jenkins compares the remote HEAD with the one it
-        // last built and starts the job when they differ. It polls the job's
-        // own SCM, which is now hku/pipeline_uat on GitLab. Five minutes is
-        // often enough for a demo, and it costs one request to GitLab each
-        // time.
-        pollSCM('*/5 * * * *')
+        // This needs a GitHub server to be configured in Jenkins first
+        // (Manage Jenkins -> System -> GitHub). Without one the delivery is
+        // rejected and the pipeline still has to be started from the UI.
+        githubPush()
     }
 
     stages {
@@ -555,7 +537,6 @@ pipeline {
                 // needs that is NOT the application lives here: this file,
                 // the Ansible roles, the setup script.
                 git branch: 'main',
-                    credentialsId: "${PIPELINE_CREDENTIALS}",
                     url: "${PIPELINE_REPO_URL}"
             }
         }
