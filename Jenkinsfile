@@ -307,6 +307,18 @@
 //   now uses oven/bun:1.3-alpine, which carries 4 HIGH and 0 CRITICAL. The
 //   application dependency trees are clean: 0 HIGH/CRITICAL.
 //
+//   THE REPORT: all of this is in ONE page. The 'Image Scan' stage ends with
+//   scripts/build_report.py, which renders vulnerability-report.html out of
+//   the scan output that is already on disk — the image's OS packages, the
+//   image's libraries, the image's secrets, the source tree's secrets and the
+//   dependency advisories, in one document, with the severity, the installed
+//   and fixed versions, the links and the scope of every finding.
+//
+//   It is the open-source replacement for the console dashboard, and it is
+//   better in one respect: the console showed the IMAGE only. This page
+//   shows the image AND the code, because the code scan is part of the same
+//   CI band and its findings belong in the same document.
+//
 //   THE GAP, stated plainly: this pipeline does NOT scan for MALWARE.
 //   A commercial scanner's assurance policy covered malware and root_user;
 //   the open-source replacement covers root_user (above) and, for malware,
@@ -680,6 +692,47 @@ pipeline {
                     echo "trivy (source secrets) exit code: ${SECRET_RC}"
 
                     # ------------------------------------------------------------------
+                    # The same scan as JSON, for the one-page vulnerability report
+                    # that the 'Image Scan' stage builds at the end.
+                    #
+                    # Trivy's own HTML template renders vulnerabilities and
+                    # misconfigurations, but NOT secrets — so the report is
+                    # rendered by scripts/build_report.py, and it needs the
+                    # findings in a machine-readable form.
+                    #
+                    # This run is a SECOND gate as well: the count below is
+                    # checked, so the report and the gate can never disagree.
+                    # The table scan above blocks on any secret; this one
+                    # blocks on any secret the JSON run saw. Both must be
+                    # clean for the build to pass.
+                    # ------------------------------------------------------------------
+                    podman run --rm --name hku-trivy-fs-json-${BUILD_NUMBER} \
+                        --network host --security-opt label=disable \
+                        -v trivy-cache:/root/.cache/trivy \
+                        -e TRIVY_DB_REPOSITORY=docker.io/aquasec/trivy-db:2 \
+                        -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/src:ro \
+                        ${TRIVY_IMAGE} \
+                        fs --scanners secret \
+                            --format json \
+                            --skip-dirs "node_modules,dist,.git,backups" \
+                            /src > trivy-secret-report.json 2> trivy-secret-json.err || true
+
+                    SECRET_JSON_COUNT=$(python3 -c "import json;d=json.load(open('trivy-secret-report.json'));print(sum(len(r.get('Secrets') or []) for r in (d.get('Results') or [])))" 2>/dev/null || echo "-1")
+
+                    if [ "${SECRET_JSON_COUNT}" = "-1" ]; then
+                        echo "BLOCKED: the source secret scan output could not be read —"
+                        echo "        see trivy-secret-json.err"
+                        exit 1
+                    fi
+
+                    if [ "${SECRET_JSON_COUNT}" -ne 0 ]; then
+                        echo "BLOCKED: Trivy detected ${SECRET_JSON_COUNT} secret(s) in the source tree — see trivy-secret-report.json"
+                        exit 1
+                    fi
+
+                    echo "trivy (source secrets, JSON) count: ${SECRET_JSON_COUNT}"
+
+                    # ------------------------------------------------------------------
                     # 2. bun audit — dependency advisories straight from the lockfiles.
                     #    `bun audit` reads ONLY the lockfile, so it needs neither
                     #    a build nor node_modules: the source tree is mounted
@@ -782,7 +835,7 @@ pipeline {
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'bun-audit-root.json,bun-audit-server.json,audit-scope-root.txt,audit-scope-server.txt,trivy-secret-report.txt',
+                    archiveArtifacts artifacts: 'bun-audit-root.json,bun-audit-server.json,audit-scope-root.txt,audit-scope-server.txt,trivy-secret-report.txt,trivy-secret-report.json,trivy-secret-json.err',
                                      allowEmptyArchive: true
                 }
             }
@@ -1157,6 +1210,89 @@ pipeline {
                             --format table \
                             ${FULL_IMAGE} >> trivy-os-report.txt 2>&1 || true
 
+                    # ------------------------------------------------------------------
+                    # The OS packages as JSON, for the vulnerability report.
+                    # The same scan the gate above ran, in a machine-readable
+                    # form, so the report can list the findings with their
+                    # severity, their fixed version and their links.
+                    #
+                    # The CRITICAL count below is checked as well, so the
+                    # report and the gate cannot disagree: a CRITICAL in the
+                    # JSON is a CRITICAL in the image, whatever the table run
+                    # said.
+                    # ------------------------------------------------------------------
+                    podman run --rm --name hku-trivy-os-json-${BUILD_NUMBER} \
+                        --network host --security-opt label=disable \
+                        -v ${PODMAN_SOCK}:/var/run/docker.sock \
+                        -v trivy-cache:/root/.cache/trivy \
+                        -e TRIVY_DB_REPOSITORY=docker.io/aquasec/trivy-db:2 \
+                        ${TRIVY_IMAGE} \
+                        image --scanners vuln \
+                            --pkg-types os \
+                            --severity HIGH,CRITICAL \
+                            --format json \
+                            ${FULL_IMAGE} > trivy-os-report.json 2> trivy-os-json.err || true
+
+                    OS_JSON_CRITICAL=$(python3 -c "import json;d=json.load(open('trivy-os-report.json'));print(sum(1 for r in (d.get('Results') or []) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='CRITICAL'))" 2>/dev/null || echo "-1")
+
+                    if [ "${OS_JSON_CRITICAL}" = "-1" ]; then
+                        echo "BLOCKED: the OS scan output could not be read — see trivy-os-json.err"
+                        exit 1
+                    fi
+
+                    if [ "${OS_JSON_CRITICAL}" -ne 0 ]; then
+                        echo "BLOCKED: Trivy reported a CRITICAL OS vulnerability in the runtime image — see trivy-os-report.json"
+                        exit 1
+                    fi
+
+                    echo "trivy (OS packages, JSON) CRITICAL count: ${OS_JSON_CRITICAL}"
+
+                    # ------------------------------------------------------------------
+                    # The vulnerability report — ONE page with everything the
+                    # CI band found, the image and the code together.
+                    #
+                    # This is the open-source replacement for the console
+                    # dashboard. Trivy's own HTML template renders ONE Trivy
+                    # report at a time, and it does not render secrets at all,
+                    # so scripts/build_report.py renders all five sections
+                    # itself: the image's OS packages, the image's libraries,
+                    # the image's secrets, the source tree's secrets and the
+                    # dependency advisories — from the scan output that is
+                    # already on disk. No console, no account, no server to
+                    # keep alive; the report is downloaded from the build page
+                    # like any other artefact.
+                    #
+                    # It is generated BEFORE the gates below, so a BLOCKED
+                    # build still leaves a report behind to diagnose.
+                    #
+                    # A report that cannot be written is a failure: an
+                    # unreadable report must never look like a clean scan.
+                    # ------------------------------------------------------------------
+                    REPORT_RC=0
+                    python3 scripts/build_report.py \
+                        --os-json trivy-os-report.json \
+                        --image-json trivy-report.json \
+                        --secret-json trivy-secret-report.json \
+                        --audit bun-audit-root.json bun-audit-server.json \
+                        --lock app/bun.lock app/server/bun.lock \
+                        --image ${FULL_IMAGE} \
+                        --tag ${IMAGE_VERSION} \
+                        --digest ${IMAGE_DIGEST} \
+                        --build "#${BUILD_NUMBER}" \
+                        --out vulnerability-report.html || REPORT_RC=$?
+
+                    if [ "${REPORT_RC}" -ne 0 ]; then
+                        echo "BLOCKED: the vulnerability report could not be written — see the message above"
+                        exit 1
+                    fi
+
+                    if [ ! -s vulnerability-report.html ]; then
+                        echo "BLOCKED: vulnerability-report.html is empty."
+                        exit 1
+                    fi
+
+                    echo "vulnerability report: vulnerability-report.html ($(wc -c < vulnerability-report.html) bytes)"
+
                     if [ "${TRIVY_SCOPE_RC}" -eq 2 ]; then
                         echo "BLOCKED: the Trivy findings could not be scoped — the scan is not verified, so it is not a pass — see trivy-report.txt"
                         exit 1
@@ -1177,7 +1313,7 @@ pipeline {
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'trivy-config-report.txt,trivy-report.txt,trivy-report.json,trivy-scan.err,trivy-os-report.txt',
+                    archiveArtifacts artifacts: 'trivy-config-report.txt,trivy-report.txt,trivy-report.json,trivy-scan.err,trivy-os-report.txt,trivy-os-report.json,trivy-os-json.err,vulnerability-report.html',
                                      allowEmptyArchive: true
                 }
             }
@@ -1455,8 +1591,10 @@ UAT_DB=${env.UAT_DB}
                              hku-trivy-config-${BUILD_NUMBER} \
                              hku-trivy-${BUILD_NUMBER} \
                              hku-trivy-fs-${BUILD_NUMBER} \
+                             hku-trivy-fs-json-${BUILD_NUMBER} \
                              hku-trivy-os-${BUILD_NUMBER} \
                              hku-trivy-os-high-${BUILD_NUMBER} \
+                             hku-trivy-os-json-${BUILD_NUMBER} \
                              hku-intranet-verify-${BUILD_NUMBER} \
                              hku-verify-db-${BUILD_NUMBER} 2>/dev/null || true
 
@@ -1488,7 +1626,7 @@ UAT_DB=${env.UAT_DB}
                     <p><b>UAT</b>: <a href=\"http://${UAT_HOST}:${UAT_PORT}/\">http://${UAT_HOST}:${UAT_PORT}/</a> (database <code>${UAT_DB}</code>)</p>
                     <p><b>PROD</b>: not touched. This job never deploys to production.</p>
                     <p><b>Next step</b>: test UAT. When it passes, start the <code>pipeline-prod</code> job to promote these exact bytes — the promotion record is <code>${env.PROMOTION_FILE}</code>.</p>
-                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">trivy-config-report.txt, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
+                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">vulnerability-report.html (one page — image and code), trivy-config-report.txt, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
                 """,
@@ -1503,7 +1641,7 @@ UAT_DB=${env.UAT_DB}
                 body: """<h2>HKU ENGG Intranet — CI/CD — UAT Build #${BUILD_NUMBER} FAILED</h2>
                     <p>Image: <code>${env.FULL_IMAGE ?: 'unresolved'}</code></p>
                     <p>Check the console for the failure stage. This job only ever touches UAT, so nothing was deployed to UAT and nothing was deployed to production.</p>
-                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">trivy-config-report.txt, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
+                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">vulnerability-report.html (one page — image and code), trivy-config-report.txt, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
                 """,

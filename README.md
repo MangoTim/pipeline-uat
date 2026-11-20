@@ -184,6 +184,46 @@ somewhere else.
 
 ---
 
+## The vulnerability report — one page, image and code
+
+Every build writes **`vulnerability-report.html`** and archives it with the
+other artefacts, so it is downloaded from the build page like any Jenkins
+artifact. It is the open-source replacement for the console dashboard, and it
+covers **more** than the dashboard did: the console showed the image only.
+
+`scripts/build_report.py` renders it out of the scan output that is already on
+disk — no second scan, no new data source:
+
+| Section | Where the findings come from |
+|---|---|
+| 1. Image — OS packages of the runtime base | `trivy-os-report.json` — the CVEs in the base image the customer runs |
+| 2. Image — library dependencies | `trivy-report.json` — the builder stage, which still holds the frontend dependency tree |
+| 3. Image — secrets in the layers | `trivy-report.json` |
+| 4. Code scan — secrets in the source tree | `trivy-secret-report.json` |
+| 5. Code scan — dependency advisories | `bun-audit-root.json`, `bun-audit-server.json` |
+
+Every row carries the package, the advisory ID, the severity, the installed and
+fixed versions, the **scope** — SHIPPED or BUILD-ONLY, worked out from the
+lockfiles by the same rule the gates use — the path that reaches the package
+and the links. The summary table at the top says how many of each severity
+each scan found, and the verdict.
+
+Three things are deliberate:
+
+- **Trivy's own HTML template is not enough.** `/contrib/html.tpl` renders one
+  Trivy report at a time, and it renders vulnerabilities and
+  misconfigurations — but **not secrets**. The `bun audit` findings are not
+  Trivy findings at all. So the page is rendered by a script instead.
+- **The report is generated before the gates**, so a BLOCKED build still
+  leaves a report behind to diagnose.
+- **A report that cannot be written fails the build.** An unreadable report
+  must never look like a clean scan — the same rule the two scope scripts
+  follow.
+
+The page says the one gap out loud as well: it does **not** cover malware.
+
+---
+
 ## What the approval decides
 
 UAT and PROD run the **same tag** — the one the UAT build pushed and scanned.

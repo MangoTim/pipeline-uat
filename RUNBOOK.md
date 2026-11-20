@@ -143,7 +143,7 @@ re-gates the old code; the direct deploy above is the quick path.
 | `Code Scan (secrets + dependencies)` | a secret is committed, or `bun audit` finds a HIGH/Critical CVE | the Trivy secret table, or the bun audit CVE list |
 | `Build Image` | the Containerfile does not build | the podman build log |
 | `Push to Registry` | the pushed digest is not the scanned digest | "digest mismatch" |
-| `Image Scan` | Trivy finds a HIGH/CRITICAL misconfiguration in the Containerfile, the built image runs as root, or Trivy finds a CRITICAL | the Trivy config table, the `image user:` line, or the Trivy table |
+| `Image Scan` | Trivy finds a HIGH/CRITICAL misconfiguration in the Containerfile, the built image runs as root, Trivy finds a CRITICAL, or the vulnerability report cannot be written | the Trivy config table, the `image user:` line, the Trivy table, or the report error |
 | `Deploy & Verify` | the image does not start on the CI host | the container log |
 | `Deploy UAT` | the env file is missing, the port does not open, or the readiness endpoint names the wrong database | the Ansible failure, naming the path or the database |
 | `Record Promotion` | the promotion directory cannot be written | the mkdir/cp failure |
@@ -183,6 +183,17 @@ asks for malware scanning it has to come from somewhere else.
 cached in the `trivy-cache` volume. A first build is slow for that reason
 only. The *misconfiguration* rules — the checks bundle, which carries DS0002 —
 are downloaded separately and cached in the same volume.
+
+**The vulnerability report** — every build writes `vulnerability-report.html`
+and archives it with the other artefacts, so it is downloaded from the build
+page like any Jenkins artifact. It is one page with five sections: the image's
+OS packages, the image's libraries, the image's secrets, the source tree's
+secrets and the dependency advisories — the image **and** the code together.
+`scripts/build_report.py` renders it from the scan output that is already on
+disk, so it costs no extra scan. It is generated *before* the gates, so a
+blocked build still leaves one behind to diagnose, and a report that cannot be
+written **fails the build** — an unreadable report must never look like a
+clean scan. The same rule the two scope scripts follow.
 
 ## 6. Troubleshooting
 
