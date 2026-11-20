@@ -14,10 +14,14 @@
 //   ansible/, the setup script in scripts/ and the design picture in docs/.
 //
 //   The APPLICATION is not here. It lives in its own repository,
-//   MangoTim/hku-calendar, and the 'Fetch App Source' stage clones it at a
+//   hku/hku_intranet, and the 'Fetch App Source' stage clones it at a
 //   pinned commit into ${WORKSPACE}/app. That is the same two-repository
 //   shape the RHEL MCP pipeline uses (pipeline-dr + the app repo), and it
 //   keeps the pipeline and the code it ships independently versioned.
+//
+//   BOTH repositories live on the SELF-HOSTED GITLAB at 192.168.147.52 —
+//   this one as hku/pipeline_uat, the application as hku/hku_intranet. GitHub
+//   keeps a mirror of each, but nothing in the pipeline reads from it.
 //
 //   The pipeline and the application never mix: the container that UAT and
 //   PROD run is built from the app repository, and this file only decides
@@ -81,13 +85,56 @@
 //
 //   4. Pipeline job configuration — TWO jobs, one repository
 //        Definition:  Pipeline script from SCM
-//        SCM:         Git | https://github.com/MangoTim/pipeline-uat.git
+//        SCM:         Git | git@192.168.147.52:hku/pipeline_uat.git
 //        Branch:      */main
+//        Credentials: SSH Private Key — the credential with id `gitlab-ssh`
 //        Script Path: Jenkinsfile              (the job `pipeline-uat`)
 //        Script Path: Jenkinsfile.prod         (the job `pipeline-prod`)
 //        (This repository IS the pipeline — the Jenkinsfiles, the Ansible
 //         roles and the setup script are all committed here, and the deploy
 //         stages run ${WORKSPACE}/ansible/deploy.yml from it.)
+//
+//        The SCM is the self-hosted GitLab, NOT GitHub. The project
+//        hku/pipeline_uat is PRIVATE, so the job needs a credential. The
+//        one to use is an SSH Private Key with id `gitlab-ssh`, whose
+//        private half is the file the controller already holds at
+//        /var/jenkins_home/.ssh/id_rhai108_rsa — the same key that is
+//        registered on the GitLab account and that Ansible uses for the
+//        .104/.105 hosts. One key in the lab, three uses.
+//
+//        The credential is created from the script console (the
+//        createCredentials REST endpoint returns HTTP 500 on this
+//        controller):
+//
+//          def key = new File('/var/jenkins_home/.ssh/id_rhai108_rsa').getText('UTF-8')
+//          def src = new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource(key)
+//          def cred = new BasicSSHUserPrivateKey(CredentialsScope.GLOBAL,
+//              'gitlab-ssh', 'git', src, null,
+//              'SSH key for the GitLab server at 192.168.147.52')
+//          cred.setKnownHostsFile(new File('/var/jenkins_home/.ssh/known_hosts').getText('UTF-8'))
+//          store.getCredentials().add(cred); store.save()
+//
+//        And the same known_hosts file is what the raw `git fetch` in the
+//        'Fetch App Source' stage checks the host key against.
+//
+//   4a. The trigger is pollSCM, not a webhook.
+//        A push to the PIPELINE repository starts a build. Not to the
+//        application repository — that was never what it did: the trigger
+//        derives the repositories it watches from the JOB's own SCM.
+//
+//        It cannot be a GitLab webhook, for three reasons that all still
+//        hold: there is no `gitlab` plugin on this controller (and
+//        installing one would need a GitLab API token, which this lab does
+//        not have); the GitHub plugin's githubPush() derives the watched
+//        repositories by parsing a GitHub URL, and a git@host:path URL is
+//        not one, so it would fire for nothing; and a webhook would need a
+//        stable public URL for this controller, whose only public URL is an
+//        ephemeral Cloudflare tunnel whose hostname changes on every
+//        restart.
+//
+//        pollSCM is a CORE Jenkins trigger. It polls the job's own SCM over
+//        SSH every five minutes and starts a build when main moves. Nothing
+//        to install, nothing to renew, nothing to break on a restart.
 //
 //   5. The agent must be the custom jenkins-with-podman image:
 //        --net=host + /run/podman/podman.sock mounted as /var/run/docker.sock
@@ -504,22 +551,30 @@ pipeline {
         // The pipeline's own repository — the one this Jenkinsfile lives in.
         // The Checkout stage clones it; the deploy stages read the Ansible
         // roles out of it.
-        PIPELINE_REPO_URL = 'https://github.com/MangoTim/pipeline-uat.git'
+        //
+        // This is the SELF-HOSTED GITLAB, not GitHub. The project
+        // hku/pipeline_uat is PRIVATE, so the SCM step needs the
+        // `gitlab-ssh` credential — see setup item 4 in the header.
+        PIPELINE_REPO_URL = 'git@192.168.147.52:hku/pipeline_uat.git'
 
         // The APPLICATION repository. The 'Fetch App Source' stage clones it
         // into ${WORKSPACE}/app, and everything after that — the version, the
         // scans, the build — works on that copy.
         //
+        // Also on the self-hosted GitLab, as hku/hku_intranet. The same
+        // release tags are on both hosts with the same SHAs, so a pin
+        // resolves to the same commit wherever it is read from.
+        //
         // APP_REF pins the exact commit the pipeline builds. It must be a TAG
-        // (v1.1.0) or a full commit SHA — never a branch name. A branch moves
+        // (v1.1.1) or a full commit SHA — never a branch name. A branch moves
         // under you, and "the artefact is exactly the commit named here" would
         // be a lie. The 'Fetch App Source' stage refuses to run if this is a
         // branch, so the pin cannot be lost by accident.
         //
         // Move it forward deliberately: that is the record of what was
         // promoted to PROD.
-        APP_REPO = 'https://github.com/MangoTim/hku-calendar.git'
-        APP_REF  = 'v1.1.0'
+        APP_REPO = 'git@192.168.147.52:hku/hku_intranet.git'
+        APP_REF  = 'v1.1.1'
 
         // The controller's SSH key for Ansible. The path is relative to the
         // CONTROLLER's home, so the same inventory works from the Jenkins
@@ -527,6 +582,16 @@ pipeline {
         // is /home/server, not JENKINS_HOME, so the "~" in ansible.cfg would
         // not resolve — the deploy stages export ANSIBLE_PRIVATE_KEY_FILE.
         ANSIBLE_KEY   = '/var/jenkins_home/.ssh/id_rhai108_rsa'
+
+        // The SSH key the git commands use when they talk to the GitLab
+        // server. The 'Fetch App Source' stage shells out to `git fetch`
+        // rather than using the Jenkins git step, and a shell cannot reach
+        // the `gitlab-ssh` credential — so it is given the key directly.
+        //
+        // It is the SAME key file as ANSIBLE_KEY, on purpose: one key in the
+        // lab, authorized on GitLab, on .104 and on .105.
+        GIT_SSH_KEY     = '/var/jenkins_home/.ssh/id_rhai108_rsa'
+        GIT_KNOWN_HOSTS = '/var/jenkins_home/.ssh/known_hosts'
 
         // Where the promotion record is written. JENKINS_HOME lives in the
         // jenkins_data volume, so a record survives a container recreate —
@@ -551,16 +616,31 @@ pipeline {
     }
 
     triggers {
-        // The GitHub plugin's push trigger: when the APPLICATION repository
-        // receives a push, GitHub delivers a webhook to Jenkins and this
-        // pipeline starts. The trigger only LISTENS — the hook on the GitHub
-        // side has to be created as well, pointing at this Jenkins' webhook
-        // endpoint.
+        // A push to the PIPELINE repository starts a build. Not to the
+        // application repository — that was never what this trigger did: the
+        // GitHub plugin derives the repositories it watches from the JOB's
+        // own SCM, so it only ever watched the pipeline repo.
         //
-        // This needs a GitHub server to be configured in Jenkins first
-        // (Manage Jenkins -> System -> GitHub). Without one the delivery is
-        // rejected and the pipeline still has to be started from the UI.
-        githubPush()
+        // It is now pollSCM rather than a webhook, because the SCM is the
+        // self-hosted GitLab and the trigger has to work without a GitLab
+        // plugin:
+        //
+        //   * The GitHub plugin's githubPush() cannot watch a GitLab
+        //     repository. It derives the watched repositories from the job's
+        //     SCM by parsing the GitHub URL — a git@host:path URL is not one,
+        //     so the trigger would fire for nothing.
+        //   * There is no `gitlab` plugin on this controller, and installing
+        //     one would need a GitLab API token — and there is no token in
+        //     this lab.
+        //   * A GitLab webhook would need a stable public URL for this
+        //     controller. The only public URL it has is an ephemeral
+        //     Cloudflare quick tunnel, whose hostname changes on every
+        //     restart — the same fragility the GitHub webhook had.
+        //
+        // pollSCM has none of those problems: it polls the job's own SCM
+        // over SSH and starts a build when main moves. It is a core
+        // Jenkins trigger, so there is no plugin to keep installed.
+        pollSCM('H/5 * * * *')
     }
 
     stages {
@@ -570,8 +650,15 @@ pipeline {
                 // The pipeline's own repository. Everything the pipeline
                 // needs that is NOT the application lives here: this file,
                 // the Ansible roles, the setup script.
+                //
+                // The credential is the SSH Private Key with id `gitlab-ssh`
+                // — the public half of the key at
+                // /var/jenkins_home/.ssh/id_rhai108_rsa, which is registered
+                // on the GitLab account. The project is private, so without
+                // it the clone is refused.
                 git branch: 'main',
-                    url: "${PIPELINE_REPO_URL}"
+                    url: "${PIPELINE_REPO_URL}",
+                    credentialsId: 'gitlab-ssh'
             }
         }
 
@@ -593,6 +680,17 @@ pipeline {
                     rm -rf app
                     mkdir app
                     cd app
+
+                    # The git commands below talk to the self-hosted GitLab
+                    # over SSH. A shell cannot reach the `gitlab-ssh`
+                    # credential, so the key is named directly — it is the
+                    # SAME key the Jenkins git step uses, and the same key
+                    # Ansible uses, so there is exactly one key in the lab.
+                    #
+                    # StrictHostKeyChecking=yes against a known_hosts file: the
+                    # host key is checked, not waved through.
+                    export GIT_SSH_COMMAND="ssh -i ${GIT_SSH_KEY} -o UserKnownHostsFile=${GIT_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes"
+
                     git init -q
                     git remote add origin ${APP_REPO}
 
@@ -602,7 +700,7 @@ pipeline {
                     # whatever the branch happens to point at today.
                     if git ls-remote --heads origin ${APP_REF} | grep -q .; then
                         echo "BLOCKED: APP_REF '${APP_REF}' is a BRANCH."
-                        echo "         APP_REF must be a release tag (v1.1.0) or a"
+                        echo "         APP_REF must be a release tag (v1.1.1) or a"
                         echo "         full commit SHA, so the build is reproducible."
                         exit 1
                     fi

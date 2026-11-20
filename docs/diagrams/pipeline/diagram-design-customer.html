@@ -239,7 +239,7 @@
         <div class="callout plain" style="margin-left:-40px;">2</div>
         <div class="txt">
           <b>GitLab and Jenkins</b>
-          via Webhooks
+          the job polls the SCM
         </div>
       </div>
 
@@ -271,7 +271,7 @@
         <div class="band-b">
           <div class="env-row">
 
-            <div class="env uat"><div class="hookh"></div><div class="env-t">UAT Environment<span class="env-host">192.168.10.104 &middot; with CI</span><span class="jobpill">job pipeline-uat</span><span class="verpill">v1.1.19112613</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
+            <div class="env uat"><div class="hookh"></div><div class="env-t">UAT Environment<span class="env-host">192.168.10.104 &middot; with CI</span><span class="jobpill">job pipeline-uat</span><span class="verpill">v1.1.20112616</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
@@ -285,7 +285,7 @@
 
             <div class="greenarrow"><div class="line"></div></div>
 
-            <div class="env prod"><div class="callout" style="right:-15px; top:-15px;">6</div><div class="env-t">Production Environment<span class="env-host">192.168.10.105</span><span class="jobpill">job pipeline-prod</span><span class="verpill live">v1.1.18112612</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
+            <div class="env prod"><div class="callout" style="right:-15px; top:-15px;">6</div><div class="env-t">Production Environment<span class="env-host">192.168.10.105</span><span class="jobpill">job pipeline-prod</span><span class="verpill live">v1.1.19112613</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
 
           </div>
 
@@ -321,6 +321,6 @@
     </div>
   </div>
 
-  <div class="legend"><span><i>1</i>GitLab &rarr; Jenkins</span><span><i>2</i>the webhook starts the run</span><span><i>3</i>the shared PostgreSQL server</span><span><i>4</i>the approval gate &mdash; in the PROD job</span><span><i>5</i>one private repo, pinned</span><span><i>6</i>PROD live</span></div>
+  <div class="legend"><span><i>1</i>GitLab &rarr; Jenkins</span><span><i>2</i>the trigger starts the run</span><span><i>3</i>the shared PostgreSQL server</span><span><i>4</i>the approval gate &mdash; in the PROD job</span><span><i>5</i>one private repo, pinned</span><span><i>6</i>PROD live</span></div>
 
 </div></body></html>

@@ -1,4 +1,4 @@
-"""Render the CI/CD design as one PNG — GitHub, Jenkins, UAT, PROD.
+"""Render the CI/CD design as one PNG — GitLab, Jenkins, UAT, PROD.
 
     python docs/diagrams/pipeline/build_design.py
 
@@ -12,9 +12,9 @@ at the far left, a CD band across the top holding the environments, and a CI
 band underneath holding the build. Boxes carry a title and nothing else —
 the detail lives in the README, not on the slide.
 
-It is the shape the HKU ENGG Intranet pipeline uses: GitHub is the SCM,
-Jenkins builds and scans the image once, the registry holds it, UAT gets it
-first, and a human approves before it goes to production.
+It is the shape the HKU ENGG Intranet pipeline uses: the self-hosted GitLab
+is the SCM, Jenkins builds and scans the image once, the registry holds it,
+UAT gets it first, and a human approves before it goes to production.
 
 The pipeline is TWO Jenkins jobs. `pipeline-uat` builds, scans and deploys
 UAT; `pipeline-prod` approves and deploys production. The picture says so,
@@ -54,7 +54,7 @@ PALETTE = dict(
     yellow="#FFF3CD",
     yellowedge="#C9A227",
     yellowink="#7A5A00",
-    github="#24292F",
+    gitlab="#FC6D26",
     postgres="#336791",
 )
 
@@ -66,7 +66,7 @@ CSS = Template("""
     --green: $green; --amber: $amber;
     --greenbg: $greenbg; --redbg: $redbg; --infobg: $infobg;
     --yellow: $yellow; --yellowedge: $yellowedge; --yellowink: $yellowink;
-    --github: $github; --postgres: $postgres;
+    --gitlab: $gitlab; --postgres: $postgres;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -99,7 +99,7 @@ CSS = Template("""
   .legend2 .txt { font-size: 11px; color: var(--ink); line-height: 1.45; }
   .legend2 .txt b { display: block; font-size: 11.5px; }
 
-  /* ---- the dashed path: up out of the GitHub server, into the CD band ---- */
+  /* ---- the dashed path: up out of the GitLab server, into the CD band ---- */
   .hookh { position: absolute; right: 100%; top: 24px; width: 273px;
            border-top: 1.4px dashed #8A8A8A; }
   .hookh::after {
@@ -118,10 +118,10 @@ CSS = Template("""
                     height: 281px; border-left: 1.4px dashed #8A8A8A; }
   .gitbox .wordmark {
     display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700;
-    color: var(--github);
+    color: var(--gitlab);
   }
   .gitbox .wordmark i {
-    font-style: normal; background: var(--github); color: #FFFFFF; border-radius: 4px;
+    font-style: normal; background: var(--gitlab); color: #FFFFFF; border-radius: 4px;
     font-size: 10px; padding: 2px 6px; letter-spacing: .5px;
   }
   .gitbox .sub { font-size: 10.5px; color: var(--ink); margin: 4px 0 0 0; line-height: 1.35; }
@@ -163,7 +163,7 @@ CSS = Template("""
   .brands { display: flex; gap: 8px; }
   .brand { font-size: 11px; font-weight: 800; letter-spacing: .6px; color: #FFFFFF;
            border-radius: 4px; padding: 3px 9px; }
-  .brand.github { background: var(--github); }
+  .brand.glab { background: transparent; color: var(--gitlab); padding: 3px 0; }
   .brand.ansible { background: #111111; }
   .brand.podman { background: var(--blue); }
   .brand.trivy { background: #5A3E8B; }
@@ -289,8 +289,8 @@ CSS = Template("""
 #  The content
 # --------------------------------------------------------------------------- #
 LEGEND = [
-    (1, "GitHub &rarr; Jenkins"),
-    (2, "the webhook starts the run"),
+    (1, "GitLab &rarr; Jenkins"),
+    (2, "the trigger starts the run"),
     (3, "the data tier &mdash; one PostgreSQL host, .103"),
     (4, "the approval gate &mdash; in the PROD job"),
     (5, "one private repo, pinned"),
@@ -373,15 +373,15 @@ def build_html() -> str:
       <div class="legend2">
         <div class="callout plain" style="margin-left:-40px;">2</div>
         <div class="txt">
-          <b>GitHub and Jenkins</b>
-          via Webhooks
+          <b>GitLab and Jenkins</b>
+          the job polls the SCM
         </div>
       </div>
 
       <div class="gitbox">
         <div class="callout" style="left:-16px; top:-16px;">5</div>
-        <div class="wordmark"><i>GH</i> GitHub</div>
-        <div class="sub">Private GitHub Repo</div>
+        <div class="wordmark"><i>GL</i> GitLab</div>
+        <div class="sub">Private GitLab Repo</div>
         <div class="conn">
           <div class="num">1</div>
           <div class="line"></div>
@@ -409,7 +409,7 @@ def build_html() -> str:
             {env_box("uat", "UAT Environment", 0, HOOKIN,
                      host="192.168.147.104 &middot; with CI",
                      job="pipeline-uat",
-                     version="v1.1.19112613")}
+                     version="v1.1.20112616")}
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
@@ -427,7 +427,7 @@ def build_html() -> str:
                      num_style="right:-15px; top:-15px;",
                      host="192.168.147.105",
                      job="pipeline-prod",
-                     version="v1.1.18112612", live=True)}
+                     version="v1.1.19112613", live=True)}
 
           </div>
 
@@ -437,7 +437,7 @@ def build_html() -> str:
           <div class="band-note">UAT and PROD are <b>two separate Jenkins jobs</b>
             &mdash; the promotion is a job boundary, not a step inside one build.
             The UAT job writes a promotion record; the PROD job reads it, and a
-            human approves before it deploys. A push to GitHub can never reach
+            human approves before it deploys. A push to GitLab can never reach
             production. The two boxes are running <b>different images</b>:
             UAT is on the candidate, PROD is still on the version that was
             approved last &mdash; until the same bytes are promoted.</div>
@@ -447,7 +447,7 @@ def build_html() -> str:
       <!-- ---------- CI ---------- -->
       <div class="band ci">
         <div class="band-h">
-          <span class="brands"><span class="brand github">GITHUB</span></span>
+          <span class="brands"><span class="brand glab">GITLAB</span></span>
           <span class="band-title">CI (Continuous Integration)
             <span class="hostpill">192.168.147.104</span>
             <span class="jobpill">job pipeline-uat</span>

@@ -77,8 +77,13 @@
 //
 //   The job itself: New Item → Pipeline → name `pipeline-prod` →
 //   Definition: Pipeline script from SCM → Git
-//   https://github.com/MangoTim/pipeline-uat.git → Branch */main →
+//   git@192.168.147.52:hku/pipeline_uat.git → Branch */main →
+//   Credentials: SSH Private Key `gitlab-ssh` →
 //   Script Path: Jenkinsfile.prod → Save.
+//
+//   The SCM is the self-hosted GitLab, the same as the UAT job. The
+//   project is private, so the credential is not optional — see the header
+//   of the UAT Jenkinsfile for how the `gitlab-ssh` credential is made.
 //
 //   The parameters below are created by the `parameters` block on the first
 //   run, and are also declared in the job's config so that
@@ -103,7 +108,7 @@ pipeline {
 
         // The pipeline's own repository — the same one the UAT job uses. The
         // deploy stage runs ${WORKSPACE}/ansible/deploy.yml out of it.
-        PIPELINE_REPO_URL = 'https://github.com/MangoTim/pipeline-uat.git'
+        PIPELINE_REPO_URL = 'git@192.168.147.52:hku/pipeline_uat.git'
 
         // The controller's SSH key for Ansible. The Jenkins container's HOME
         // is /home/server, not JENKINS_HOME, so the "~" in ansible.cfg would
@@ -154,7 +159,8 @@ pipeline {
         stage('Checkout') {
             steps {
                 git branch: 'main',
-                    url: "${PIPELINE_REPO_URL}"
+                    url: "${PIPELINE_REPO_URL}",
+                    credentialsId: 'gitlab-ssh'
             }
         }
 

@@ -1,13 +1,13 @@
 # pipeline-uat — the HKU ENGG Intranet CI/CD pipeline
 
-The pipeline that takes the intranet application from a commit on GitHub to a
-running container on the UAT site, and — **after a human has tested it** — the
-**same bytes** on the production site.
+The pipeline that takes the intranet application from a commit on the
+self-hosted GitLab to a running container on the UAT site, and — **after a
+human has tested it** — the **same bytes** on the production site.
 
 It is **two Jenkins jobs**, not one:
 
 ```
-GitHub ──▶ [ pipeline-uat ] ──▶ registry
+GitLab ─▶ [ pipeline-uat ] ──▶ registry
           code scan → build → push → image scan → UAT → record the promotion
           (Trivy,     (podman)  (registry)  (Trivy   .104:8097
            bun audit)                       only)   engg_intranet_uat
@@ -39,10 +39,14 @@ tested.
 | `RUNBOOK.md` | day-two notes — running a build, reading a failure, rolling back |
 
 **The application is not in here.** It lives in its own repository,
-[`MangoTim/hku-calendar`](https://github.com/MangoTim/hku-calendar.git), and the
+`hku/hku_intranet` on the self-hosted GitLab at `192.168.147.52`, and the
 `Fetch App Source` stage clones it at a pinned ref into `${WORKSPACE}/app`.
 The pipeline and the code it ships are versioned independently, exactly as the
 RHEL MCP pipeline does it (`MangoTim/pipeline-dr` + the app repo).
+
+**Both repositories live on the self-hosted GitLab** — this one as
+`hku/pipeline_uat`, the application as `hku/hku_intranet`. GitHub keeps a
+mirror of each, but nothing in the pipeline reads from it any more.
 
 ---
 
@@ -78,8 +82,8 @@ over the network — the same path a real promotion takes.
 
 | Stage | What it does | Gate |
 |---|---|---|
-| `Checkout` | this repository, from `MangoTim/pipeline-uat` | |
-| `Fetch App Source` | clones `MangoTim/hku-calendar` at `main`, records the commit | |
+| `Checkout` | this repository, from `hku/pipeline_uat` on the GitLab | |
+| `Fetch App Source` | clones `hku/hku_intranet` at the pinned `APP_REF` tag, records the commit | |
 | `Resolve Version` | reads `app/VERSION` → the `major.minor` of the image tag | |
 | `Code Scan (secrets + dependencies)` | `trivy fs --scanners secret .` on the source, and `bun audit --json` — both sorted by `scripts/audit_scope.py` into what ships and what is only a build tool | **hard gate** |
 | `Build Image` | `podman build` of the builder stage and the runtime stage | |
@@ -95,7 +99,7 @@ This job never touches production. A push to `main` starts it.
 
 | Stage | What it does | Gate |
 |---|---|---|
-| `Checkout` | this repository, from `MangoTim/pipeline-uat` | |
+| `Checkout` | this repository, from `hku/pipeline_uat` on the GitLab | |
 | `Load Promotion Record` | reads the record the UAT job wrote; fails if there is none | |
 | `Verify Promotion` | the tag still points at the tested bytes · UAT is still running that image · the record is not too old | **hard gate** |
 | `Manual Approval` | a human decides whether production gets it | **human gate** |
@@ -245,7 +249,7 @@ UAT build number the bytes came from:
 ```
   image    : 192.168.147.104:8082/hku-intranet:v1.1.17112601
   digest   : sha256:...
-  app      : https://github.com/MangoTim/hku-calendar.git @ <commit>
+  app      : git@192.168.147.52:hku/hku_intranet.git @ <commit>
   UAT      : http://192.168.147.104:8097/   (health ok, database engg_intranet_uat)
   UAT build: #14   (recorded 2026-11-18T16:40:12+08:00)
   PROD     : http://192.168.147.105:8093/
@@ -404,70 +408,94 @@ in a way that is easy to misread.
     | | `pipeline-uat` | `pipeline-prod` |
     |---|---|---|
     | Definition | *Pipeline script from SCM* | *Pipeline script from SCM* |
-    | SCM | Git · `https://github.com/MangoTim/pipeline-uat.git` | the same |
+    | SCM | Git · `git@192.168.147.52:hku/pipeline_uat.git` | the same |
     | Branch | `*/main` | the same |
+    | Credentials | SSH Private Key · `gitlab-ssh` | the same |
     | Script Path | `Jenkinsfile` | `Jenkinsfile.prod` |
-    | Trigger | `githubPush()` — a push starts it | **none** — a human starts it |
+    | Trigger | `pollSCM` — a push starts it | **none** — a human starts it |
     | Parameters | none | `PROMOTION_ID` (default `latest`), `MAX_AGE_HOURS` (default `72`) |
 
     The pipeline's own repository IS the pipeline: the Jenkinsfiles, the
     Ansible roles and the setup script are all committed here, and the deploy
     stages run `${WORKSPACE}/ansible/deploy.yml` from it.
 
-    `pipeline-uat` was created on 2026-11-12. **No credential has to be filled
-    in by hand before the first build** — the scanner is open source and needs
-    none. (An `aqua-console` credential may still exist on the controller for
-    the *other* project that shares it, the `aqua-demo` job; this pipeline
-    does not use it.)
+    `pipeline-uat` was created on 2026-11-12. **The only credential that has to
+    be filled in is the GitLab SSH key** — the scanner is open source and
+    needs none. (An `aqua-console` credential may still exist on the
+    controller for the *other* project that shares it, the `aqua-demo` job;
+    this pipeline does not use it.)
+
+    The `gitlab-ssh` credential is an SSH Private Key whose private half is
+    the file the controller already has at
+    `/var/jenkins_home/.ssh/id_rhai108_rsa` — the same key registered on the
+    GitLab account and used by Ansible for the .104/.105 hosts. It is created
+    from the script console, because the `createCredentials` REST endpoint
+    returns HTTP 500 on this controller:
+
+    ```groovy
+    def key = new File('/var/jenkins_home/.ssh/id_rhai108_rsa').getText('UTF-8')
+    def src = new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource(key)
+    def cred = new BasicSSHUserPrivateKey(CredentialsScope.GLOBAL,
+        'gitlab-ssh', 'git', src, null,
+        'SSH key for the GitLab server at 192.168.147.52')
+    cred.setKnownHostsFile(new File('/var/jenkins_home/.ssh/known_hosts').getText('UTF-8'))
+    store.getCredentials().add(cred); store.save()
+    ```
 
     The `pipeline-prod` job is created the same way: *New Item → Pipeline →
     name `pipeline-prod` → Definition: Pipeline script from SCM → Git
-    `https://github.com/MangoTim/pipeline-uat.git` → Branch `*/main` → **Script
+    `git@192.168.147.52:hku/pipeline_uat.git` → Branch `*/main` →
+    Credentials: `gitlab-ssh` → **Script
     Path: `Jenkinsfile.prod`** → Save*. Its two parameters are declared in the
     Jenkinsfile, and are also added to the job configuration so that
     *Build with Parameters* works from the very first run.
 
 ---
 
-## The webhook
+## The trigger
 
 The pipeline does not have to be started from the Jenkins UI. The Jenkinsfile
 declares
 
 ```groovy
 triggers {
-    githubPush()
+    pollSCM('H/5 * * * *')
 }
 ```
 
-and the job is a *Pipeline script from SCM* whose SCM is
-`https://github.com/MangoTim/pipeline-uat.git`. The GitHub plugin matches an
-incoming push against the job's SCM, so **a push to `main` of this repository
-starts the run** — no button to press.
+`pollSCM` is a **core** Jenkins trigger — nothing to install. Every five
+minutes Jenkins asks the job's own SCM whether `main` has moved, and if it
+has, the run starts. No button to press.
 
 Only `pipeline-uat` carries the trigger. `pipeline-prod` has no `triggers`
-block at all, so the plugin never starts it from a push — even though both
-jobs share the same SCM. Production moves only when a person starts it.
+block at all, so nothing ever starts it from a push — even though both jobs
+share the same SCM. Production moves only when a person starts it.
 
-Two things had to be in place for that to work:
+**It polls the PIPELINE repository, not the application repository.** That is
+not a change: the old `githubPush()` trigger derived the repositories it
+watched from the job's own SCM, so it only ever watched the pipeline repo
+either. A push to the application repository has never started a build — the
+application is moved forward by editing `APP_REF` and letting the next
+pipeline build pick it up.
+
+### Why not a webhook?
+
+A GitLab webhook would be the obvious answer, and it does not work here:
 
 | | |
 |---|---|
-| a GitHub server in Jenkins | *Manage Jenkins → System → GitHub* — the API URL `https://api.github.com`, "Manage hooks" on, and a credential whose password is the personal access token. Without it the plugin has nowhere to look and the delivery is dropped. |
-| a hook on the repository | the GitHub side: a `web` hook on `MangoTim/pipeline-uat`, `push` events, pointing at Jenkins' `/github-webhook/` endpoint |
+| no GitLab plugin | there is no `gitlab` plugin on this controller, and installing one needs a GitLab API token — and this lab has no token. |
+| the GitHub plugin cannot stand in | `githubPush()` derives the repositories it watches by parsing a GitHub URL out of the job's SCM. `git@192.168.147.52:hku/pipeline_uat.git` is not a GitHub URL, so it would fire for nothing. |
+| no stable public URL | Jenkins is on a private LAN. The only public URL it has is an **ephemeral Cloudflare quick tunnel**, whose hostname changes on every restart — so a hook pointed at it breaks as soon as the tunnel is restarted. That is the same fragility the old GitHub webhook had. |
 
-The delivery has to reach Jenkins from the internet, and Jenkins lives on a
-private LAN. The hook URL is therefore a tunnel. **A quick Cloudflare tunnel
-is the URL used here**, and that has one sharp edge worth knowing before a
-demo: a quick tunnel has no uptime guarantee and its hostname changes every
-time it is restarted, so after a restart the hook has to be pointed at the new
-hostname.
+`pollSCM` has none of those three problems. It costs one SSH round trip every
+five minutes and it cannot break.
 
-For a permanent URL, use a *named* Cloudflare tunnel — it is free and gives
-a stable `*.cfargotunnel.com` hostname — or give ngrok a second domain. The
-ngrok account on the demo host cannot: it is on the free plan, which allows
-exactly one reserved domain, and that one is already serving the public
-demo.
+If a webhook is ever wanted, the order of work is: install the `gitlab`
+plugin, create a GitLab API token, and put the GitLab server in Jenkins
+(*Manage Jenkins → System → GitLab Servers*) with that token — and give the
+controller a **named** Cloudflare tunnel, whose `*.cfargotunnel.com` hostname
+survives a restart, instead of a quick one.
 
 ---
 
@@ -504,7 +532,7 @@ reads the registry: its tag and its digest come from the promotion record.
 | the deployment | [`ansible/`](ansible/) — [its own README](ansible/README.md) |
 | the picture | [`docs/diagrams/pipeline/`](docs/diagrams/pipeline/) |
 | day-two notes | [`RUNBOOK.md`](RUNBOOK.md) |
-| the app | <https://github.com/MangoTim/hku-calendar.git> |
+| the app | `git@192.168.147.52:hku/hku_intranet.git` |
 | the other pipeline | <https://github.com/MangoTim/pipeline-dr.git> |
 
 ## Running it by hand

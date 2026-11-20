@@ -18,8 +18,8 @@ one-time host setup. This file is the day-two document.
 | UAT site | `http://192.168.147.104:8097` |
 | PROD site | `http://192.168.147.105:8093` |
 | database | `192.168.147.103:5432` — two databases, two roles |
-| pipeline repo | <https://github.com/MangoTim/pipeline-uat.git> |
-| application repo | <https://github.com/MangoTim/hku-calendar.git> |
+| pipeline repo | `git@192.168.147.52:hku/pipeline_uat.git` (self-hosted GitLab) |
+| application repo | `git@192.168.147.52:hku/hku_intranet.git` (self-hosted GitLab) |
 
 ## 2. Running a build
 
@@ -28,10 +28,11 @@ one-time host setup. This file is the day-two document.
 1. Open Jenkins at `http://192.168.147.104:8081`.
 2. Pick the job **`pipeline-uat`** — it is a NEW job, separate from
    `mcp-dr-pipeline` and its two drill jobs.
-3. *Build Now*. The job checks out `main` of `pipeline-uat` and clones the
-   application at the pinned ref of `hku-calendar`.
+3. *Build Now*. The job checks out `main` of `hku/pipeline_uat` and clones the
+   application at the pinned ref of `hku/hku_intranet`.
 
-   A push to `main` of `pipeline-uat` starts the same run without the button.
+   A push to `main` of `pipeline-uat` starts the same run without the button —
+   the job's `pollSCM` trigger notices within five minutes.
 4. The build runs through the scans, deploys UAT, writes the promotion
    record and **ends there**. Nothing was deployed to production.
 5. Open the UAT site — `http://192.168.147.104:8097` — and try it. This is
@@ -269,4 +270,4 @@ The SQL that sets this up is in [`ansible/README.md`](ansible/README.md), under
 | the deployment | [`ansible/`](ansible/) — [its own README](ansible/README.md) |
 | the picture | [`docs/diagrams/pipeline/`](docs/diagrams/pipeline/) |
 | the design | [`README.md`](README.md) |
-| the app | <https://github.com/MangoTim/hku-calendar.git> |
+| the app | `git@192.168.147.52:hku/hku_intranet.git` |

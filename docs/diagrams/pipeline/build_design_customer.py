@@ -315,7 +315,7 @@ HOST_PROD = "192.168.10.105"
 
 LEGEND = [
     (1, "GitLab &rarr; Jenkins"),
-    (2, "the webhook starts the run"),
+    (2, "the trigger starts the run"),
     (3, "the shared PostgreSQL server"),
     (4, "the approval gate &mdash; in the PROD job"),
     (5, "one private repo, pinned"),
@@ -391,7 +391,7 @@ def build_html() -> str:
         <div class="callout plain" style="margin-left:-40px;">2</div>
         <div class="txt">
           <b>GitLab and Jenkins</b>
-          via Webhooks
+          the job polls the SCM
         </div>
       </div>
 
@@ -426,7 +426,7 @@ def build_html() -> str:
             {env_box("uat", "UAT Environment", 0, HOOKIN,
                      host=f"{HOST_CI} &middot; with CI",
                      job="pipeline-uat",
-                     version="v1.1.19112613")}
+                     version="v1.1.20112616")}
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
@@ -444,7 +444,7 @@ def build_html() -> str:
                      num_style="right:-15px; top:-15px;",
                      host=HOST_PROD,
                      job="pipeline-prod",
-                     version="v1.1.18112612", live=True)}
+                     version="v1.1.19112613", live=True)}
 
           </div>
 
