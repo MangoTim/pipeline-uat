@@ -574,7 +574,7 @@ pipeline {
         // Move it forward deliberately: that is the record of what was
         // promoted to PROD.
         APP_REPO = 'git@192.168.147.52:hku/hku_intranet.git'
-        APP_REF  = 'v1.1.1'
+        APP_REF  = 'v1.1.2'
 
         // The controller's SSH key for Ansible. The path is relative to the
         // CONTROLLER's home, so the same inventory works from the Jenkins
