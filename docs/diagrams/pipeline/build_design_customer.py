@@ -426,7 +426,7 @@ def build_html() -> str:
             {env_box("uat", "UAT Environment", 0, HOOKIN,
                      host=f"{HOST_CI} &middot; with CI",
                      job="pipeline-uat",
-                     version="v1.1.20112616")}
+                     version="v1.1.20112620")}
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
