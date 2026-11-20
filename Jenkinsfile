@@ -304,7 +304,11 @@
 //   Every CVE that showed up was inherited from the base image, not from this
 //   code. The Debian runtime base (oven/bun:1.3-slim) carried 100
 //   HIGH/CRITICAL, 3 of them CRITICAL, all in perl-base. The runtime stage
-//   now uses oven/bun:1.3-alpine, which carries 4 HIGH and 0 CRITICAL. The
+//   now uses oven/bun:1.3-alpine, which carries a handful of HIGH and 0
+//   CRITICAL. The exact count MOVES with the vulnerability database — the
+//   database is refreshed on every run — so no number is written down here.
+//   The report of the day is the authority: trivy-os-report.txt, and the
+//   same findings in the one-page vulnerability-report.html. The
 //   application dependency trees are clean: 0 HIGH/CRITICAL.
 //
 //   THE REPORT: all of this is in ONE page. The 'Image Scan' stage ends with
@@ -331,7 +335,7 @@
 // ---------------------------------------------------------------------------
 // Known accepted risks (deliberate, so the pipeline stays green):
 //
-//   * The 4 HIGH OS CVEs in the alpine base have a fix in a newer alpine
+//   * The HIGH OS CVEs in the alpine base have a fix in a newer alpine
 //     release that no oven/bun tag has picked up yet. They are reported in
 //     trivy-os-report.txt but not gated; CRITICAL is the line that stops a
 //     build. Re-check when oven/bun publishes a newer alpine base.
@@ -1174,10 +1178,13 @@ pipeline {
                     # OS packages of the image we actually ship.
                     # HARD GATE on CRITICAL. The runtime base is
                     # oven/bun:1.3-alpine, which currently carries 0 CRITICAL
-                    # and 4 HIGH (all with a fix available in a newer alpine
-                    # release). Gating on HIGH too would block the build on a
-                    # base-image update we do not control, so HIGH is
-                    # reported and CRITICAL is the line that stops a build.
+                    # and a handful of HIGH (all with a fix available in a
+                    # newer alpine release). Gating on HIGH too would block
+                    # the build on a base-image update we do not control, so
+                    # HIGH is reported and CRITICAL is the line that stops a
+                    # build. The count moves with the vulnerability database,
+                    # which is refreshed on every run — so the report of the
+                    # day is the authority, not a number written down here.
                     # ------------------------------------------------------------------
                     TRIVY_OS_RC=0
                     podman run --rm --name hku-trivy-os-${BUILD_NUMBER} \
