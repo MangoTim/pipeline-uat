@@ -31,7 +31,7 @@
 //                             per environment. The intranet DR site joins
 //                             this host later (the standby replica).
 //
-//   192.168.147.104   CI+UAT Jenkins, the image registry and Aqua (CI),
+//   192.168.147.104   CI+UAT Jenkins and the image registry (CI),
 //                             plus the UAT container. This is where the
 //                             pipeline runs and where the candidate release
 //                             is tried out.
@@ -53,24 +53,31 @@
 // ============================================================================
 // One-time setup required BEFORE the first build
 //
-//   1. Credential "aqua-console"
-//        Manage Jenkins → Credentials → (global) → Add Credentials
-//        Kind: Username with password | ID: aqua-console | Username: administrator
-//        (Aqua Console admin password — used by the scanner CLI --user/--password.)
+//   1. NOTHING TO INSTALL FOR THE SCANNER.
 //
-//   2. Registry running AND registered in the Aqua Console
+//        The CI band is 100% open source. Trivy is Apache-2.0
+//        (github.com/aquasecurity/trivy) and the vulnerability database it
+//        reads is open too. There is no commercial console, no licence, no
+//        account and no credential to create: the scanner runs as a
+//        `podman run` of a public image, against the public database.
+//
+//        `docker.io/aquasec/trivy` is the Docker Hub publication of that
+//        same open-source project (its canonical home is
+//        ghcr.io/aquasecurity/trivy) — `aquasec` there is the publisher
+//        namespace, not a commercial product.
+//
+//   2. Registry running
 //        podman run -d --name registry --network host \
 //          -v registry_data:/var/lib/registry \
 //          -e REGISTRY_HTTP_ADDR=:8082 docker.io/library/registry:2
-//        Console → Registries → Add → http://192.168.147.104:8082 (no auth)
 //
-//   3. Assurance policy "testing-image-assurance" must control:
-//        malware + root_user
-//        root_user is why the Containerfile ends with `USER bun` — a
-//        root-running image reports "Image Is Non-compliant" and the gate
-//        below blocks the build. (Optionally add a vulnerability control once
-//        the OS CVE backlog is triaged; today the policy is malware+root only,
-//        so the Aqua image scan does NOT gate on CVEs.)
+//   3. The root-user rule
+//        The Containerfile ends with `USER bun`, and the 'Image Scan' stage
+//        enforces it twice: Trivy's misconfiguration scanner checks the
+//        Containerfile for DS002 (AVD-DS-0002, "Image user should not be
+//        'root'"), and the image that was actually BUILT is inspected, so a
+//        base image that runs as root is caught even if the Containerfile
+//        says otherwise.
 //
 //   4. Pipeline job configuration — TWO jobs, one repository
 //        Definition:  Pipeline script from SCM
@@ -85,7 +92,7 @@
 //   5. The agent must be the custom jenkins-with-podman image:
 //        --net=host + /run/podman/podman.sock mounted as /var/run/docker.sock
 //        Host networking is what lets the scanner containers reach the
-//        registry, the Aqua Console and the npm / Trivy DB registries.
+//        registry and the Trivy DB registry.
 //
 //        The agent drives the HOST's podman over that socket: the pipeline
 //        sets CONTAINER_HOST=unix:///var/run/docker.sock, so podman in the
@@ -96,27 +103,10 @@
 //        Host prerequisite:  systemctl enable --now podman.socket
 //
 //   6. Script approval (FIRST BUILD ONLY)
-//        The Aqua scanner CLI and Trivy run as `podman run` shell steps — no
-//        sandboxed Groovy APIs are used, so no signatures need approving.
+//        Trivy runs as a `podman run` shell step — no sandboxed Groovy APIs
+//        are used, so no signatures need approving.
 //
-//   7. The aqua-web console container must have a working OUTBOUND path
-//        to cybercenter5.aquasec.com. The scanner reaches the console fine,
-//        but the console itself performs the "cybercenter ↔ scanner
-//        compatibility" check server-side — when the console cannot reach
-//        the internet, the scan fails with:
-//            twirp error internal: Failed checking cybercenter to scanner
-//            compatibility: ... Get "https://cybercenter5.aquasec.com/":
-//            net/http: TLS handshake timeout
-//        This is a HOST-side problem, not a pipeline problem. Symptom on the
-//        host: `podman logs aqua-web` shows "dial tcp 192.168.147.103:5432:
-//        connect: no route to host" and the console UI on :8080 hangs.
-//        Cause: podman's per-container CNI chains / bridge attachment are
-//        destroyed by `firewall-cmd --reload` (firewalld uses the nftables
-//        backend and flushes the nat table that podman wrote into).
-//        Fix on the host:  podman network reload
-//        (or recreate the aqua-web / aqua-gateway containers).
-//
-//   8. UAT / PROD deployment prerequisites (needed by the deploy stages)
+//   7. UAT / PROD deployment prerequisites (needed by the deploy stages)
 //        a) The environment file on each host, owned by the deploy user:
 //             /home/uat/hku-intranet/env.list     (UAT,  mode 0600)
 //             /home/rhai/hku-intranet/env.list    (PROD, mode 0600)
@@ -242,7 +232,11 @@
 //                                                 build tool (see below)
 //
 //     'Image Scan'                            AFTER the push, on the images
-//        Aqua scan (--local and --registry)      the image that ships
+//        trivy config (misconfiguration)          the Containerfile — DS002,
+//                                                 the image must not run as root
+//        podman image inspect                    the USER of the image that was
+//                                                 actually BUILT — the
+//                                                 authoritative root check
 //        trivy vuln,secret --pkg-types library   ${SCAN_IMAGE} — the builder
 //                                                  stage, which still holds the
 //                                                  full frontend dependency tree
@@ -291,18 +285,36 @@
 //   record. See Jenkinsfile.prod.
 //
 // ---------------------------------------------------------------------------
-// What "Image Is Compliant" does and does not mean
+// What the open-source scan covers — and the one thing it does not
 //
-//   The Aqua console's Compliant badge comes from the ASSURANCE POLICY
-//   (testing-image-assurance = malware + root_user). It is NOT a statement
-//   that the image is free of CVEs — the console shows those separately, in
-//   the Vulnerabilities tab of the image page.
+//   Every gate in the CI band is Trivy, and Trivy is Apache-2.0. Nothing in
+//   this pipeline needs a commercial scanner, a licence or an account.
 //
-//   Every CVE that showed up there was inherited from the base image, not
-//   from this code. The Debian runtime base (oven/bun:1.3-slim) carried 100
+//   The scan is NOT a statement that the image is free of CVEs. It is a
+//   statement about four specific things, and the reports say which:
+//
+//     no secret in the source tree          trivy fs --scanners secret
+//     no secret in the image                trivy image --scanners secret
+//     no advisory in a dependency that      scripts/trivy_scope.py
+//       SHIPS to the customer                  (HIGH and CRITICAL)
+//     no CRITICAL CVE in the OS packages    trivy image --pkg-types os
+//     the image does not run as root        trivy config (DS002) + podman
+//                                            image inspect
+//
+//   Every CVE that showed up was inherited from the base image, not from this
+//   code. The Debian runtime base (oven/bun:1.3-slim) carried 100
 //   HIGH/CRITICAL, 3 of them CRITICAL, all in perl-base. The runtime stage
 //   now uses oven/bun:1.3-alpine, which carries 4 HIGH and 0 CRITICAL. The
 //   application dependency trees are clean: 0 HIGH/CRITICAL.
+//
+//   THE GAP, stated plainly: this pipeline does NOT scan for MALWARE.
+//   A commercial scanner's assurance policy covered malware and root_user;
+//   the open-source replacement covers root_user (above) and, for malware,
+//   nothing. The Trivy malware plugin that would have closed this gap has
+//   been withdrawn upstream — its repository is gone and it is no longer in
+//   the Trivy plugin index. If malware scanning is required, it needs a
+//   separate open-source scanner (e.g. ClamAV) with its own signature
+//   database to maintain, and that is a decision, not a default.
 //
 // ---------------------------------------------------------------------------
 // Known accepted risks (deliberate, so the pipeline stays green):
@@ -383,10 +395,16 @@ pipeline {
         REGISTRY      = '192.168.147.104:8082'
         REGISTRY_URL  = 'http://192.168.147.104:8082'
         IMAGE_NAME    = 'hku-intranet'
-        AQUA_HOST     = 'https://192.168.147.104'
-        SCANNER_IMAGE = 'registry.aquasec.com/scanner:2022.4.868'
+
+        // The ONE scanner in this pipeline, and it is open source.
+        //
+        // Trivy is Apache-2.0 (github.com/aquasecurity/trivy). The
+        // `aquasec` in the image name is the Docker Hub PUBLISHER namespace
+        // for that same open-source project — its canonical home is
+        // ghcr.io/aquasecurity/trivy — and `aquasec/trivy-db:2` is the open
+        // vulnerability database. Neither needs a licence, an account or a
+        // commercial console, and the CI band has no credential for either.
         TRIVY_IMAGE   = 'docker.io/aquasec/trivy:0.76.1'
-        AQUA_CREDS_ID = 'aqua-console'
 
         // ------------------------------------------------------------------
         // The container runtime the pipeline drives.
@@ -840,7 +858,7 @@ pipeline {
 
                     # Prove that what the client pulls from the registry is
                     # the same image that was built here and then scanned by
-                    # Aqua / Trivy in the stage below. Without this the scan
+                    # Trivy in the stage below. Without this the scan
                     # evidence and the delivered artefact could in principle
                     # be different images.
                     #
@@ -914,110 +932,112 @@ pipeline {
         }
 
         stage('Image Scan') {
-            // Every scan that needs an IMAGE happens here, after the push:
-            //   * Aqua        — the image that ships, local and registry copy
-            //   * Trivy lib   — ${SCAN_IMAGE}, the builder stage, which still
-            //                   holds the full frontend dependency tree
-            //   * Trivy os    — ${FULL_IMAGE}, the runtime base we ship
+            // Every scan that needs an IMAGE happens here, after the push.
+            // All of it is Trivy, which is Apache-2.0 — no commercial
+            // scanner, no licence, no account, no credential:
+            //
+            //   * config    — the Containerfile: DS002 (AVD-DS-0002), the
+            //                 image must not run as root
+            //   * root      — the USER of the image that was actually BUILT
+            //   * lib       — ${SCAN_IMAGE}, the builder stage, which still
+            //                 holds the full frontend dependency tree
+            //   * os        — ${FULL_IMAGE}, the runtime base we ship
+            //
             // The source-tree scans live in 'Code Scan (secrets + dependencies)'
             // before the build.
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: "${AQUA_CREDS_ID}",
-                    usernameVariable: 'AQUA_USER',
-                    passwordVariable: 'AQUA_PASSWORD'
-                )]) {
-                    sh '''
-                        set -u
+                // ------------------------------------------------------------------
+                // The image's own configuration: it must not run as root.
+                //
+                // This replaces the root_user control that a commercial
+                // scanner's assurance policy used to provide, and it does it
+                // twice on purpose:
+                //
+                //   1. trivy config — the FILE. DS002 (AVD-DS-0002), "Image
+                //      user should not be 'root'", HIGH severity. Trivy
+                //      recognises a file named `Dockerfile` AND `Containerfile`,
+                //      so this repository's file is picked up as it is.
+                //   2. podman image inspect — the ARTEFACT. This is the one
+                //      that decides: a Containerfile that says `USER bun` but
+                //      was built on a base that runs as root must still be
+                //      caught, and only the built image can tell us that.
+                //
+                // Both run BEFORE the CVE scans, so an image that would be
+                // rejected is rejected in seconds rather than minutes.
+                // ------------------------------------------------------------------
+                sh '''
+                    set -u
 
-                        # Capture the scanner exit code instead of letting
-                        # `set -e` kill the shell — otherwise a scanner failure
-                        # produces no diagnostic at all, only a red stage.
-                        SCAN_RC=0
-                        podman run --rm --name aqua-scan-${BUILD_NUMBER} \
-                            --network host \
-                            --security-opt label=disable --user root \
-                            -v ${PODMAN_SOCK}:/var/run/docker.sock \
-                            ${SCANNER_IMAGE} \
-                            scan \
-                                --host ${AQUA_HOST} \
-                                --local ${FULL_IMAGE} \
-                                --no-verify \
-                                --user ${AQUA_USER} \
-                                --password ${AQUA_PASSWORD} \
-                                --html > aqua-report.html 2> aqua-scan.err || SCAN_RC=$?
+                    # ------------------------------------------------------------------
+                    # 1. The Containerfile.
+                    #
+                    # `trivy config` needs no image and no runtime socket — it
+                    # reads the file. The source tree is mounted from the
+                    # jenkins_data volume, because the HOST resolves every
+                    # bind mount and the workspace only exists inside that
+                    # volume.
+                    #
+                    # `trivy config` has NO --scanners flag (that is an
+                    # image/fs flag); the misconfiguration scan is what the
+                    # `config` subcommand does. It downloads the checks
+                    # bundle — the rule set, not the CVE database — on the
+                    # first run and caches it in the Trivy cache volume.
+                    #
+                    # Only the Containerfile is scanned, not the whole tree:
+                    # it is the file that defines the image that ships, and a
+                    # compose file or a Kubernetes manifest in the repository
+                    # has nothing to do with what is actually deployed.
+                    # ------------------------------------------------------------------
+                    CONFIG_RC=0
+                    podman run --rm --name hku-trivy-config-${BUILD_NUMBER} \
+                        --network host --security-opt label=disable \
+                        -v trivy-cache:/root/.cache/trivy \
+                        -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/src:ro \
+                        ${TRIVY_IMAGE} \
+                        config \
+                            --severity HIGH,CRITICAL \
+                            --exit-code 1 \
+                            --format table \
+                            /src/Containerfile > trivy-config-report.txt 2>&1 || CONFIG_RC=$?
 
-                        if [ "${SCAN_RC}" -ne 0 ]; then
-                            echo "--- Aqua scanner stderr ---"
-                            cat aqua-scan.err || true
-                            echo "--- Aqua scanner output ---"
-                            cat aqua-report.html || true
-                            echo ""
-                            echo "BLOCKED: Aqua scanner CLI exited ${SCAN_RC}"
-                            echo "HINT: 'TLS handshake timeout' / 'Failed checking cybercenter to"
-                            echo "      scanner compatibility' means the aqua-web console container"
-                            echo "      on the Jenkins host has lost its outbound path. Fix on the"
-                            echo "      host with:  podman network reload"
-                            echo "      (or recreate aqua-web + aqua-gateway), then re-run."
-                            exit 1
-                        fi
+                    cat trivy-config-report.txt
+                    echo "trivy (Containerfile config) exit code: ${CONFIG_RC}"
 
-                        echo "--- Aqua scan summary ---"
-                        # Print the compliance marker so it shows in the console
-                        grep -oE "Image Is (Compliant|Non-compliant)" aqua-report.html || true
-                        # Hard CI/CD gate: pipeline only proceeds if image is Compliant.
-                        # Non-compliant (or missing marker) fails the build.
-                        grep -q "Image Is Compliant" aqua-report.html \
-                            || { echo "BLOCKED: image is non-compliant (or scan report missing compliance marker)"; exit 1; }
+                    # ------------------------------------------------------------------
+                    # 2. The image that was actually built and pushed.
+                    #
+                    # The local store holds the registry's copy of ${FULL_IMAGE}
+                    # (the 'Push to Registry' stage pulls it back), so this
+                    # inspects the exact bytes the UAT and PROD sites pull.
+                    # ------------------------------------------------------------------
+                    INSPECT_RC=0
+                    IMAGE_USER=$(podman image inspect ${FULL_IMAGE} --format '{{.Config.User}}' 2>/dev/null) || INSPECT_RC=$?
 
-                        # ------------------------------------------------------------------
-                        # Also record the REGISTRY copy of the very same image.
-                        #
-                        # The scan above used --local, so the console files the
-                        # image under the scanner's own local store. This second
-                        # scan pulls the pushed image back from the registry, so
-                        # the console ALSO lists it under
-                        #     192.168.147.104:8082/hku-intranet:<version>
-                        # and the client can find it by tag instead of by
-                        # build number.
-                        #
-                        # Non-blocking on purpose: the local scan above is the
-                        # gate (it inspects the exact bytes that will run), and
-                        # this one only enriches the console record. If the
-                        # registry reference cannot be resolved the build
-                        # still proceeds.
-                        #
-                        # Do NOT add --register / --register-compliant here.
-                        # Registration is a licence-counted operation, and the
-                        # console refuses it once the plan's repository limit
-                        # is reached ("the image license limit has been
-                        # exceeded"). It is also unnecessary: the local scan
-                        # above already scans the registry-qualified name
-                        # (192.168.147.104:8082/hku-intranet:<version>), so
-                        # the console files the image under that repository
-                        # and tag on its own — the client finds it by tag
-                        # without any explicit registration.
-                        # ------------------------------------------------------------------
-                        echo "--- Aqua registry scan (informational) ---"
-                        podman run --rm --name aqua-scan-reg-${BUILD_NUMBER} \
-                            --network host \
-                            --security-opt label=disable --user root \
-                            -v ${PODMAN_SOCK}:/var/run/docker.sock \
-                            ${SCANNER_IMAGE} \
-                            scan \
-                                --host ${AQUA_HOST} \
-                                --registry ${REGISTRY_URL} \
-                                --no-verify \
-                                --user ${AQUA_USER} \
-                                --password ${AQUA_PASSWORD} \
-                                --html \
-                                ${IMAGE_NAME}:${IMAGE_VERSION} \
-                                > aqua-registry-report.html 2> aqua-registry-scan.err \
-                            || echo "NOTE: registry scan did not complete (informational only) — see aqua-registry-scan.err"
+                    if [ "${INSPECT_RC}" -ne 0 ]; then
+                        echo "BLOCKED: could not read ${FULL_IMAGE} from the local image store."
+                        echo "        The image the registry serves is the one that has to be"
+                        echo "        checked — a missing image is not a pass."
+                        exit 1
+                    fi
 
-                        grep -oE "Image Is (Compliant|Non-compliant)" aqua-registry-report.html || true
-                    '''
-                }
+                    echo "image user: '${IMAGE_USER}'"
+
+                    if [ -z "${IMAGE_USER}" ] || [ "${IMAGE_USER}" = "root" ] || [ "${IMAGE_USER}" = "0" ]; then
+                        echo "BLOCKED: the runtime image runs as root ('${IMAGE_USER}')."
+                        echo "        The Containerfile must end with a non-root USER, because this"
+                        echo "        container is what reaches the customer."
+                        exit 1
+                    fi
+
+                    if [ "${CONFIG_RC}" -ne 0 ]; then
+                        echo "BLOCKED: Trivy found a HIGH/CRITICAL misconfiguration in the"
+                        echo "        Containerfile (or the config scan itself failed) — the"
+                        echo "        root-user rule is DS002 — see trivy-config-report.txt"
+                        exit 1
+                    fi
+
+                    echo "Config check OK: the image does not run as root, and the Containerfile has no HIGH/CRITICAL misconfiguration."
+                '''
 
                 // ------------------------------------------------------------------
                 // Trivy, on the IMAGES.
@@ -1050,8 +1070,7 @@ pipeline {
                     # runs on the host (see CONTAINER_HOST in the environment
                     # block) and the host resolves every bind mount. Inside
                     # the container it is still called /var/run/docker.sock —
-                    # that is the name Trivy and the Aqua scanner look for.
-                    # The same mount works for both of them.
+                    # that is the name Trivy looks for.
                     #
                     # No --severity filter here: the scope script applies the
                     # threshold to the vulnerabilities, and a secret is a
@@ -1158,7 +1177,7 @@ pipeline {
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'aqua-report.html,aqua-scan.err,aqua-registry-report.html,aqua-registry-scan.err,trivy-report.txt,trivy-report.json,trivy-scan.err,trivy-os-report.txt',
+                    archiveArtifacts artifacts: 'trivy-config-report.txt,trivy-report.txt,trivy-report.json,trivy-scan.err,trivy-os-report.txt',
                                      allowEmptyArchive: true
                 }
             }
@@ -1420,8 +1439,8 @@ UAT_DB=${env.UAT_DB}
                 fi
 
                 # Remove the sidecar containers this build started. They all
-                # run with --rm, but a FAILED run can leave one behind (the
-                # Aqua scanner's scan-target container is the usual one), and
+                # run with --rm, but a FAILED run can leave one behind (a
+                # Trivy scan-target container is the usual one), and
                 # a container holding an image makes `podman rmi` refuse:
                 #     image used by <id>: image is in use by a container
                 #
@@ -1430,11 +1449,10 @@ UAT_DB=${env.UAT_DB}
                 # names does not exist. Most of these names do not exist in
                 # any given build, so without --ignore this block removes
                 # nothing at all.
-                podman rm -f --ignore aqua-scan-${BUILD_NUMBER} \
-                             aqua-scan-reg-${BUILD_NUMBER} \
-                             hku-audit-${BUILD_NUMBER} \
+                podman rm -f --ignore hku-audit-${BUILD_NUMBER} \
                              hku-audit-fs-${BUILD_NUMBER} \
                              hku-audit-fs-srv-${BUILD_NUMBER} \
+                             hku-trivy-config-${BUILD_NUMBER} \
                              hku-trivy-${BUILD_NUMBER} \
                              hku-trivy-fs-${BUILD_NUMBER} \
                              hku-trivy-os-${BUILD_NUMBER} \
@@ -1464,13 +1482,13 @@ UAT_DB=${env.UAT_DB}
                     <p>Image: <code>${env.FULL_IMAGE}</code></p>
                     <p>Digest: <code>${env.IMAGE_DIGEST}</code></p>
                     <p>Application: <code>${APP_REPO}</code> @ <code>${APP_COMMIT}</code></p>
-                    <p>Aqua image scan: <b>Image Is Compliant</b> (malware, root user, sensitive data)</p>
+                    <p>Image scan (Trivy, open source): <b>compliant</b> — the image does not run as root (DS002 + the built image's own USER), no HIGH/CRITICAL Containerfile misconfiguration</p>
                     <p>Code scan: no secrets in the source tree, no HIGH/CRITICAL dependency advisories, no CRITICAL OS CVEs</p>
                     <p>Deploy verify: /health + SPA root ok on <code>127.0.0.1:${VERIFY_PORT}</code></p>
                     <p><b>UAT</b>: <a href=\"http://${UAT_HOST}:${UAT_PORT}/\">http://${UAT_HOST}:${UAT_PORT}/</a> (database <code>${UAT_DB}</code>)</p>
                     <p><b>PROD</b>: not touched. This job never deploys to production.</p>
                     <p><b>Next step</b>: test UAT. When it passes, start the <code>pipeline-prod</code> job to promote these exact bytes — the promotion record is <code>${env.PROMOTION_FILE}</code>.</p>
-                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
+                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">trivy-config-report.txt, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
                 """,
@@ -1485,7 +1503,7 @@ UAT_DB=${env.UAT_DB}
                 body: """<h2>HKU ENGG Intranet — CI/CD — UAT Build #${BUILD_NUMBER} FAILED</h2>
                     <p>Image: <code>${env.FULL_IMAGE ?: 'unresolved'}</code></p>
                     <p>Check the console for the failure stage. This job only ever touches UAT, so nothing was deployed to UAT and nothing was deployed to production.</p>
-                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">aqua-report.html, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
+                    <p>Reports: <a href=\"${BUILD_URL}artifact/\">trivy-config-report.txt, audit-scope-root.txt, audit-scope-server.txt, trivy-secret-report.txt, trivy-report.txt, trivy-os-report.txt</a><br>
                        Console: <a href=\"${BUILD_URL}console\">build console</a><br>
                        Build: <a href=\"${BUILD_URL}\">#${BUILD_NUMBER}</a></p>
                 """,

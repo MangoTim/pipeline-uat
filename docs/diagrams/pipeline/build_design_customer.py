@@ -18,12 +18,16 @@ customer as a reference:
     192.168.147.105 (PROD)                  192.168.10.105
     engg_intranet_uat / engg_intranet       appdb_uat / appdb_prod
     engg_uat / engg_prod (roles)            app_uat / app_prod
-    Aqua (commercial image scanner)         Trivy (open source, both scans)
 
-The last row is a design decision, not a rename: the customer reference
-describes an all-open-source security path, where one tool (Trivy) does
-both the source scan and the image scan. The internal lab pipeline still
-runs Aqua as well — see the internal diagram for what the lab actually does.
+The scanner is the SAME in both copies: Trivy, Apache-2.0, doing both the
+source scan and the image scan. The lab pipeline buys no commercial scanner —
+there is no console, no account and no credential in the CI band — so this
+copy is a rename of the addresses and the database names, nothing more.
+
+One thing is named in the internal diagram and not in the customer one: the
+internal diagram is the one that carries the lab's own detail, including what
+the pipeline does NOT check. The customer reference describes the design, and
+the design is the open-source path.
 
 The pipeline is TWO Jenkins jobs in both copies. `pipeline-uat` builds,
 scans and deploys UAT; `pipeline-prod` approves and deploys production.
@@ -203,6 +207,13 @@ CSS = Template("""
              font-family: Consolas, "DejaVu Sans Mono", monospace; color: var(--grey);
              background: #F4F4F4; border: 1px solid var(--line);
              border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+  /* ---- the image version THIS environment is running: the point of the
+         picture is that the two of them are NOT the same ---- */
+  .verpill { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .2px;
+             font-family: Consolas, "DejaVu Sans Mono", monospace; color: #FFFFFF;
+             background: var(--green); border-radius: 4px; padding: 1px 7px; margin-left: 6px; }
+  .verpill::before { content: "running "; opacity: .75; font-weight: 400; }
+  .verpill.live { background: var(--red); }
 
   .env-chips { display: flex; gap: 8px; align-items: stretch; flex: 1 1 auto; }
   .echip { flex: 1 1 0; background: #FFFFFF; border: 1px solid var(--line);
@@ -327,7 +338,7 @@ ENV_CHIPS = {
 
 def env_box(kind: str, title: str, num: int = 0, extra: str = "",
             num_style: str = "left:-16px; top:-16px;", host: str = "",
-            job: str = "") -> str:
+            job: str = "", version: str = "", live: bool = False) -> str:
     chips = "".join(
         (f'<div class="echip">{t}</div>'
          + ('<div class="earrow">&rarr;</div>' if i < len(ENV_CHIPS[kind]) - 1 else ""))
@@ -335,8 +346,10 @@ def env_box(kind: str, title: str, num: int = 0, extra: str = "",
     callout = (f'<div class="callout" style="{num_style}">{num}</div>' if num else "")
     hostpill = f'<span class="env-host">{host}</span>' if host else ""
     jobpill = f'<span class="jobpill">job {job}</span>' if job else ""
+    verpill = (f'<span class="verpill{" live" if live else ""}">{version}</span>'
+               if version else "")
     return (f'<div class="env {kind}">{callout}{extra}'
-            f'<div class="env-t">{title}{hostpill}{jobpill}</div>'
+            f'<div class="env-t">{title}{hostpill}{jobpill}{verpill}</div>'
             f'<div class="env-chips">{chips}</div></div>')
 
 
@@ -412,7 +425,8 @@ def build_html() -> str:
 
             {env_box("uat", "UAT Environment", 0, HOOKIN,
                      host=f"{HOST_CI} &middot; with CI",
-                     job="pipeline-uat")}
+                     job="pipeline-uat",
+                     version="v1.1.19112613")}
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
@@ -429,7 +443,8 @@ def build_html() -> str:
             {env_box("prod", "Production Environment", 6,
                      num_style="right:-15px; top:-15px;",
                      host=HOST_PROD,
-                     job="pipeline-prod")}
+                     job="pipeline-prod",
+                     version="v1.1.18112612", live=True)}
 
           </div>
 
@@ -440,7 +455,9 @@ def build_html() -> str:
             &mdash; the promotion is a job boundary, not a step inside one build.
             The UAT job writes a promotion record; the PROD job reads it, and a
             human approves before it deploys. A push to GitLab can never reach
-            production.</div>
+            production. The two boxes are running <b>different images</b>:
+            UAT is on the candidate, PROD is still on the version that was
+            approved last &mdash; until the same bytes are promoted.</div>
         </div>
       </div>
 

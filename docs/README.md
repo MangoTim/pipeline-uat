@@ -24,14 +24,19 @@ for what the pipeline does, and the picture is how it is explained.
 ## What the picture says
 
 - **Three tiers, three hosts.** `.103` is the data tier (PostgreSQL 14).
-  `.104` is UAT **and** CI — Jenkins, the image registry, Aqua, plus the UAT
+  `.104` is UAT **and** CI — Jenkins, the image registry, plus the UAT
   container. `.105` is PROD, and nothing else.
 - **The CI band reads left to right.** `code scan → build → push → image
   scan`. The code scan comes first on purpose: a hardcoded secret is caught
-  before it is baked into a layer and pushed to the registry.
+  before it is baked into a layer and pushed to the registry. Both scans are
+  **Trivy** — the same open-source tool, no commercial scanner, no console.
 - **UAT and PROD are separate Jenkins jobs.** The CI band builds and deploys
   UAT; the approval gate lives in the *second* job, which a human starts after
   the UAT test has passed. The band therefore ends at UAT, and the promotion
   is a job boundary, not a step inside one build.
 - **Both sites run the *same* image tag.** So the gate decides *whether* those
   bytes reach production, never *which* bytes that is.
+- **The two boxes carry a `running <tag>` chip, and they are not equal.**
+  That is the picture of the whole point: UAT is on the candidate version
+  being tested, PROD is still on the version that was approved last. The two
+  carry the same tag only after the same bytes are promoted.

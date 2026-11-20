@@ -166,7 +166,6 @@ CSS = Template("""
   .brand.github { background: var(--github); }
   .brand.ansible { background: #111111; }
   .brand.podman { background: var(--blue); }
-  .brand.aqua { background: #1F6FEB; }
   .brand.trivy { background: #5A3E8B; }
   .band-b { padding: 8px 12px 12px 12px; }
   /* the one line of honest detail under a band */
@@ -190,6 +189,13 @@ CSS = Template("""
              font-family: Consolas, "DejaVu Sans Mono", monospace; color: var(--grey);
              background: #F4F4F4; border: 1px solid var(--line);
              border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+  /* ---- the image version THIS environment is running: the point of the
+         picture is that the two of them are NOT the same ---- */
+  .verpill { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .2px;
+             font-family: Consolas, "DejaVu Sans Mono", monospace; color: #FFFFFF;
+             background: var(--green); border-radius: 4px; padding: 1px 7px; margin-left: 6px; }
+  .verpill::before { content: "running "; opacity: .75; font-weight: 400; }
+  .verpill.live { background: var(--red); }
 
   .env-chips { display: flex; gap: 8px; align-items: stretch; flex: 1 1 auto; }
   .echip { flex: 1 1 0; background: #FFFFFF; border: 1px solid var(--line);
@@ -296,7 +302,7 @@ CI_CHIPS = [
     ("TRIVY", "trivy", "Code Scan", True),
     ("PODMAN", "podman", "Build Image", False),
     ("PODMAN", "podman", "Push to Registry", False),
-    ("AQUA", "aqua", "Image Scan", True),
+    ("TRIVY", "trivy", "Image Scan", True),
 ]
 
 ENV_CHIPS = {
@@ -307,7 +313,7 @@ ENV_CHIPS = {
 
 def env_box(kind: str, title: str, num: int = 0, extra: str = "",
             num_style: str = "left:-16px; top:-16px;", host: str = "",
-            job: str = "") -> str:
+            job: str = "", version: str = "", live: bool = False) -> str:
     chips = "".join(
         (f'<div class="echip">{t}</div>'
          + ('<div class="earrow">&rarr;</div>' if i < len(ENV_CHIPS[kind]) - 1 else ""))
@@ -315,8 +321,10 @@ def env_box(kind: str, title: str, num: int = 0, extra: str = "",
     callout = (f'<div class="callout" style="{num_style}">{num}</div>' if num else "")
     hostpill = f'<span class="env-host">{host}</span>' if host else ""
     jobpill = f'<span class="jobpill">job {job}</span>' if job else ""
+    verpill = (f'<span class="verpill{" live" if live else ""}">{version}</span>'
+               if version else "")
     return (f'<div class="env {kind}">{callout}{extra}'
-            f'<div class="env-t">{title}{hostpill}{jobpill}</div>'
+            f'<div class="env-t">{title}{hostpill}{jobpill}{verpill}</div>'
             f'<div class="env-chips">{chips}</div></div>')
 
 
@@ -400,7 +408,8 @@ def build_html() -> str:
 
             {env_box("uat", "UAT Environment", 0, HOOKIN,
                      host="192.168.147.104 &middot; with CI",
-                     job="pipeline-uat")}
+                     job="pipeline-uat",
+                     version="v1.1.19112613")}
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
@@ -417,7 +426,8 @@ def build_html() -> str:
             {env_box("prod", "Production Environment", 6,
                      num_style="right:-15px; top:-15px;",
                      host="192.168.147.105",
-                     job="pipeline-prod")}
+                     job="pipeline-prod",
+                     version="v1.1.18112612", live=True)}
 
           </div>
 
@@ -428,7 +438,9 @@ def build_html() -> str:
             &mdash; the promotion is a job boundary, not a step inside one build.
             The UAT job writes a promotion record; the PROD job reads it, and a
             human approves before it deploys. A push to GitHub can never reach
-            production.</div>
+            production. The two boxes are running <b>different images</b>:
+            UAT is on the candidate, PROD is still on the version that was
+            approved last &mdash; until the same bytes are promoted.</div>
         </div>
       </div>
 
@@ -443,8 +455,10 @@ def build_html() -> str:
         </div>
         <div class="band-b">
           <div class="ci-chips">{ci_chips}</div>
-          <div class="band-note">Jenkins, the image registry and Aqua &mdash; this host
-            carries UAT as well, so untrusted build work never touches PROD</div>
+          <div class="band-note">Jenkins and the image registry &mdash; the scanner (Trivy,
+            open source) runs as a container inside the build, so nothing commercial
+            is installed on this host. It carries UAT as well, so untrusted build
+            work never touches PROD</div>
         </div>
       </div>
 

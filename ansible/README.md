@@ -26,7 +26,7 @@ Three tiers, three hosts.
 | Host | What it is for the intranet | Deploy user |
 |---|---|---|
 | `192.168.147.103` | **the data tier** — PostgreSQL 14, holding BOTH databases. The other demo's DR site joins this host later | — |
-| `192.168.147.104` | **UAT + CI** — the intranet container, and the pipeline itself (Jenkins, the image registry, Aqua). UAT pulls the image over loopback | `uat` |
+| `192.168.147.104` | **UAT + CI** — the intranet container, and the pipeline itself (Jenkins, the image registry, Trivy). UAT pulls the image over loopback | `uat` |
 | `192.168.147.105` | **PROD** — the live site only. No CI on the box: PROD pulls the image from the registry over the network | `rhai` |
 
 CI sits with UAT rather than with PROD on purpose. The pipeline builds and
@@ -125,10 +125,11 @@ host **and** the CI host, so it needs the same treatment the other sites have
    Without this the UAT container starts but nothing can reach it from outside
    the host. **Done.**
 
-6. **The CI stack that moved here from `.105`** — Jenkins (`:8081`), the image
-   registry (`:8082`) and the Aqua console (`:8080`, `:3622`). Their volumes
-   were copied verbatim, so the registry's repositories and the Jenkins jobs
-   came across unchanged. See the top-level README for the move itself.
+6. **The CI stack that moved here from `.105`** — Jenkins (`:8081`) and the image
+   registry (`:8082`). Their volumes were copied verbatim, so the registry's
+   repositories and the Jenkins jobs came across unchanged. See the top-level
+   README for the move itself. (The scanner needs nothing on the host at all:
+   Trivy is run as a container inside the build.)
 
 ## One-time host setup — the database host (`192.168.147.103`)
 
@@ -161,8 +162,8 @@ PostgreSQL 14 is already running there on `0.0.0.0:5432` with the
    ```
 
 3. **`pg_hba.conf` — one rule per environment, ABOVE the generic one.** The
-   file also carries `host all all 0.0.0.0/0 md5`, which Aqua's Scalock and the
-   other demos on this server rely on, so it **stays**. The intranet rules go
+   file also carries `host all all 0.0.0.0/0 md5`, which the other demos on this
+   server rely on, so it **stays**. The intranet rules go
    above it, where they are matched first:
 
    ```

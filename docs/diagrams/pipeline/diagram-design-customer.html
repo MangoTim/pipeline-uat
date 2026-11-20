@@ -132,6 +132,13 @@
              font-family: Consolas, "DejaVu Sans Mono", monospace; color: var(--grey);
              background: #F4F4F4; border: 1px solid var(--line);
              border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+  /* ---- the image version THIS environment is running: the point of the
+         picture is that the two of them are NOT the same ---- */
+  .verpill { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .2px;
+             font-family: Consolas, "DejaVu Sans Mono", monospace; color: #FFFFFF;
+             background: var(--green); border-radius: 4px; padding: 1px 7px; margin-left: 6px; }
+  .verpill::before { content: "running "; opacity: .75; font-weight: 400; }
+  .verpill.live { background: var(--red); }
 
   .env-chips { display: flex; gap: 8px; align-items: stretch; flex: 1 1 auto; }
   .echip { flex: 1 1 0; background: #FFFFFF; border: 1px solid var(--line);
@@ -264,7 +271,7 @@
         <div class="band-b">
           <div class="env-row">
 
-            <div class="env uat"><div class="hookh"></div><div class="env-t">UAT Environment<span class="env-host">192.168.10.104 &middot; with CI</span><span class="jobpill">job pipeline-uat</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
+            <div class="env uat"><div class="hookh"></div><div class="env-t">UAT Environment<span class="env-host">192.168.10.104 &middot; with CI</span><span class="jobpill">job pipeline-uat</span><span class="verpill">v1.1.19112613</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
 
             <div class="approval">
               <div class="callout" style="left:-16px; top:-16px;">4</div>
@@ -278,7 +285,7 @@
 
             <div class="greenarrow"><div class="line"></div></div>
 
-            <div class="env prod"><div class="callout" style="right:-15px; top:-15px;">6</div><div class="env-t">Production Environment<span class="env-host">192.168.10.105</span><span class="jobpill">job pipeline-prod</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
+            <div class="env prod"><div class="callout" style="right:-15px; top:-15px;">6</div><div class="env-t">Production Environment<span class="env-host">192.168.10.105</span><span class="jobpill">job pipeline-prod</span><span class="verpill live">v1.1.18112612</span></div><div class="env-chips"><div class="echip">Pull Image</div><div class="earrow">&rarr;</div><div class="echip">Deploy</div><div class="earrow">&rarr;</div><div class="echip">Deploy Database &amp; Application</div></div></div>
 
           </div>
 
@@ -289,7 +296,9 @@
             &mdash; the promotion is a job boundary, not a step inside one build.
             The UAT job writes a promotion record; the PROD job reads it, and a
             human approves before it deploys. A push to GitLab can never reach
-            production.</div>
+            production. The two boxes are running <b>different images</b>:
+            UAT is on the candidate, PROD is still on the version that was
+            approved last &mdash; until the same bytes are promoted.</div>
         </div>
       </div>
 

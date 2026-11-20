@@ -9,8 +9,8 @@ It is **two Jenkins jobs**, not one:
 ```
 GitHub ──▶ [ pipeline-uat ] ──▶ registry
           code scan → build → push → image scan → UAT → record the promotion
-          (Trivy,     (podman)  (registry)  (Aqua +  .104:8097
-           bun audit)                      Trivy)   engg_intranet_uat
+          (Trivy,     (podman)  (registry)  (Trivy   .104:8097
+           bun audit)                       only)   engg_intranet_uat
                                                          │
                                     the human tests UAT  │
                                                          ▼
@@ -53,7 +53,7 @@ Three tiers, three hosts.
 | Host | What it is | What runs there |
 |---|---|---|
 | `192.168.147.103` | **the data tier** | PostgreSQL 14 — ONE instance holding TWO databases, one per environment, and one role per environment |
-| `192.168.147.104` | **UAT + CI** | the intranet container on `:8097`, plus Jenkins (`:8081`), the image registry (`:8082`) and Aqua (`:8080`) |
+| `192.168.147.104` | **UAT + CI** | the intranet container on `:8097`, plus Jenkins (`:8081`) and the image registry (`:8082`) |
 | `192.168.147.105` | **PROD** | the intranet container on `:8093`. Nothing else |
 
 **Why CI sits with UAT and not with PROD.** The pipeline builds and pushes
@@ -84,7 +84,7 @@ over the network — the same path a real promotion takes.
 | `Code Scan (secrets + dependencies)` | `trivy fs --scanners secret .` on the source, and `bun audit --json` — both sorted by `scripts/audit_scope.py` into what ships and what is only a build tool | **hard gate** |
 | `Build Image` | `podman build` of the builder stage and the runtime stage | |
 | `Push to Registry` | `podman push`, then proves the pushed digest is the scanned digest | |
-| `Image Scan` | Aqua registry scan + Trivy on the library tree (sorted by `scripts/trivy_scope.py`) and on the OS packages | **hard gate** |
+| `Image Scan` | Trivy only: the Containerfile's own configuration (DS0002 — the image must not run as root) and the USER of the image that was actually built, then Trivy on the library tree (sorted by `scripts/trivy_scope.py`) and on the OS packages | **hard gate** |
 | `Deploy & Verify` | boots the image once on the CI host to prove it starts | |
 | `Deploy UAT (Database & Application)` | Ansible → `.104:8097`, then checks the database it is connected to | |
 | `Record Promotion` | writes what was deployed — image, digest, app commit, UAT endpoint — to a file under `JENKINS_HOME` | |
@@ -152,6 +152,35 @@ A report that cannot be read is **not** a pass: both scripts exit 2 and the
 gate blocks, because "not verified" must never look like "clean". Secrets are
 never scoped — a hardcoded credential is a finding wherever it is, so a secret
 always blocks.
+
+---
+
+## The scanner: Trivy, and nothing else
+
+The CI band buys **no commercial scanner**. Everything it runs is **Trivy**,
+Apache-2.0 (`github.com/aquasecurity/trivy`), executed as a container inside
+the build. The `aquasec` in `docker.io/aquasec/trivy` is the Docker Hub
+**publisher namespace** for that same open-source project — its canonical home
+is `ghcr.io/aquasecurity/trivy` — and `aquasec/trivy-db:2` is the open
+vulnerability database. There is no console to log into, no licence, no
+account and no credential.
+
+Five checks, all of them hard gates:
+
+| | what it looks at | what it catches |
+|---|---|---|
+| `trivy fs --scanners secret` | the source tree | a hardcoded credential |
+| `bun audit` | the two lockfiles | a dependency advisory |
+| `trivy config` | the Containerfile | **DS0002** — the last `USER` must not be `root` (HIGH) |
+| `podman image inspect` | the image that was **actually built** | the same rule, against the artefact rather than the file |
+| `trivy image` | the library tree and the OS packages | a CVE in something that ships |
+
+**The one gap, stated plainly: malware.** The Trivy plugin that would have
+covered it has been withdrawn upstream — its repository is gone and it is no
+longer in the Trivy plugin index. That is a real reduction in coverage
+against the commercial policy it replaces, and it is named here rather than
+quietly dropped. If the customer needs malware scanning, it has to come from
+somewhere else.
 
 ---
 
@@ -251,25 +280,28 @@ in a way that is easy to misread.
 
 ### On the CI host (`192.168.147.104`)
 
-1. **Jenkins, the registry and Aqua** — moved here from `.105` on 2026-11-12.
+1. **Jenkins and the registry** — moved here from `.105` on 2026-11-12.
    Their volumes were copied verbatim, so the registry's repositories and the
    Jenkins jobs came across unchanged. The registry is now at
-   `http://192.168.147.104:8082` and the Aqua console at
-   `https://192.168.147.104`.
+   `http://192.168.147.104:8082`.
 
-2. **The `aqua-console` credential** — Manage Jenkins → Credentials → (global)
-   → Add Credentials. Kind: *Username with password*, ID: `aqua-console`,
-   Username: `administrator`. Used by the scanner CLI's `--user/--password`.
+2. **Nothing to install for the scanner.** The CI band is 100% open source:
+   Trivy is Apache-2.0 (`github.com/aquasecurity/trivy`) and the image it is
+   run from is `docker.io/aquasec/trivy` — `aquasec` there is the Docker Hub
+   **publisher namespace** for that same open-source project, not a commercial
+   product. Its canonical home is `ghcr.io/aquasecurity/trivy`, and
+   `aquasec/trivy-db:2` is the open vulnerability database. Neither needs a
+   licence, an account or a credential, and the CI band holds none.
 
-3. **The registry must be registered in the Aqua Console** — Console →
-   Registries → Add → `http://192.168.147.104:8082` (no auth).
+3. **The root-user rule** — the Containerfile ends with `USER bun`, and the
+   `Image Scan` stage enforces it twice: Trivy's misconfiguration scanner
+   checks the Containerfile for **DS0002** (*the last USER command should not
+   be `root`*, HIGH), and the image that was actually **built** is inspected
+   for its own `Config.User`. The second check is the authoritative one — a
+   Containerfile that says `USER bun` but was built on a base that runs as
+   root must still be caught.
 
-4. **The assurance policy `testing-image-assurance`** must control `malware`
-   and `root_user`. `root_user` is why the Containerfile ends with
-   `USER bun`: a root-running image reports *Image Is Non-compliant* and the
-   gate blocks the build.
-
-5. **The agent container's tools** — `ansible-playbook`, `python3` and the SSH
+4. **The agent container's tools** — `ansible-playbook`, `python3` and the SSH
    key `/var/jenkins_home/.ssh/id_rhai108_rsa`. The key travels with the
    `jenkins_data` volume; the tools do not, because they are installed into the
    container rather than baked into the image:
@@ -281,16 +313,14 @@ in a way that is easy to misread.
 
    Re-run it after any container recreate. It is idempotent.
 
-6. **The Aqua's outbound path** — the `aqua-web` console container must be
-   able to reach `cybercenter5.aquasec.com`, because the console performs the
-   "cybercenter ↔ scanner compatibility" check server-side. When it cannot,
-   the scan fails with `twirp error internal: Failed checking cybercenter to
-   scanner compatibility`. A `firewall-cmd --reload` destroys podman's CNI
-   chains, so `podman network reload` afterwards.
+5. **The Trivy database and rules bundle** — downloaded on demand from
+   `docker.io/aquasec/trivy-db:2` and from the checks bundle that carries the
+   misconfiguration rules. Both are cached in the `trivy-cache` volume on the
+   CI host, so only the first build pays for them.
 
 ### On the UAT host (also `192.168.147.104`)
 
-7. **The environment file** — `/home/uat/hku-intranet/env.list`, mode 0600,
+6. **The environment file** — `/home/uat/hku-intranet/env.list`, mode 0600,
    owned by `uat`. It carries UAT's own database role and password, plus the
    Entra and SSO secrets. The full template is in `ansible/README.md`. **It is
    not a copy of the PROD file** — only the Entra/SSO secrets are shared.
@@ -298,25 +328,25 @@ in a way that is easy to misread.
    > `SSO_COOKIE_SECRET` is not optional: the server refuses to start in
    > production mode without it.
 
-8. **Python 3.9** — the inventory pins `/usr/bin/python3.9`. RHEL 8 ships
+7. **Python 3.9** — the inventory pins `/usr/bin/python3.9`. RHEL 8 ships
    3.6, which ansible-core ≥ 2.15 rejects.
 
-9. **The pipeline's SSH key** in `/home/uat/.ssh/authorized_keys`.
+8. **The pipeline's SSH key** in `/home/uat/.ssh/authorized_keys`.
 
-10. **The port open** — `firewall-cmd --permanent --add-port=8097/tcp &&
-    firewall-cmd --reload && podman network reload`.
+9. **The port open** — `firewall-cmd --permanent --add-port=8097/tcp &&
+   firewall-cmd --reload && podman network reload`.
 
 ### On the database host (`192.168.147.103`)
 
-11. **The two roles and their grants**, and the `pg_hba.conf` rules. The SQL
+10. **The two roles and their grants**, and the `pg_hba.conf` rules. The SQL
     is in `ansible/README.md`, under *One-time host setup — the database host*.
 
 ### On the PROD host (`192.168.147.105`)
 
-12. **The environment file** — `/home/rhai/hku-intranet/env.list`, mode 0600,
+11. **The environment file** — `/home/rhai/hku-intranet/env.list`, mode 0600,
     owned by `rhai`, carrying `DB_NAME=engg_intranet` and `DB_USER=engg_prod`.
 
-13. **The port open** — 8093.
+12. **The port open** — 8093.
 
 ### The Jenkins jobs
 
@@ -336,13 +366,11 @@ in a way that is easy to misread.
     Ansible roles and the setup script are all committed here, and the deploy
     stages run `${WORKSPACE}/ansible/deploy.yml` from it.
 
-    `pipeline-uat` was created on 2026-11-12. One thing still has to be filled
-    in by hand before the first *real* build, because it is a per-install
-    secret rather than repository content:
-
-    | | |
-    |---|---|
-    | the `aqua-console` credential | see item 2 above — the Aqua scanner CLI needs it |
+    `pipeline-uat` was created on 2026-11-12. **No credential has to be filled
+    in by hand before the first build** — the scanner is open source and needs
+    none. (An `aqua-console` credential may still exist on the controller for
+    the *other* project that shares it, the `aqua-demo` job; this pipeline
+    does not use it.)
 
     The `pipeline-prod` job is created the same way: *New Item → Pipeline →
     name `pipeline-prod` → Definition: Pipeline script from SCM → Git

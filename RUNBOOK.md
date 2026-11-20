@@ -14,7 +14,7 @@ one-time host setup. This file is the day-two document.
 |---|---|
 | Jenkins | `http://192.168.147.104:8081` |
 | image registry | `http://192.168.147.104:8082` |
-| Aqua console | `https://192.168.147.104:8080` |
+| scanner | Trivy, Apache-2.0, run in the build — no console, no account |
 | UAT site | `http://192.168.147.104:8097` |
 | PROD site | `http://192.168.147.105:8093` |
 | database | `192.168.147.103:5432` — two databases, two roles |
@@ -143,7 +143,7 @@ re-gates the old code; the direct deploy above is the quick path.
 | `Code Scan (secrets + dependencies)` | a secret is committed, or `bun audit` finds a HIGH/Critical CVE | the Trivy secret table, or the bun audit CVE list |
 | `Build Image` | the Containerfile does not build | the podman build log |
 | `Push to Registry` | the pushed digest is not the scanned digest | "digest mismatch" |
-| `Image Scan` | Aqua reports the image non-compliant, or Trivy finds a CRITICAL | the Aqua scan report, or the Trivy table |
+| `Image Scan` | Trivy finds a HIGH/CRITICAL misconfiguration in the Containerfile, the built image runs as root, or Trivy finds a CRITICAL | the Trivy config table, the `image user:` line, or the Trivy table |
 | `Deploy & Verify` | the image does not start on the CI host | the container log |
 | `Deploy UAT` | the env file is missing, the port does not open, or the readiness endpoint names the wrong database | the Ansible failure, naming the path or the database |
 | `Record Promotion` | the promotion directory cannot be written | the mkdir/cp failure |
@@ -159,15 +159,30 @@ re-gates the old code; the direct deploy above is the quick path.
 | `Manual Approval` | nobody approves within 12 hours | the build aborts; PROD is untouched |
 | `Deploy PROD` | the same as UAT, on `.105` | the Ansible failure |
 
-**The Aqua gate** is a policy, not a scanner bug. The assurance policy
-`testing-image-assurance` controls `malware` and `root_user`. A root-running
-image is reported as *Image Is Non-compliant* — which is why the Containerfile
-ends with `USER bun`. To widen the policy to CVEs, edit it in the Aqua
-console; the pipeline needs no change.
+**The root-user gate** is enforced twice, and both checks are Trivy:
+
+1. `trivy config` reads the **Containerfile** and reports **DS0002** — *the
+   last USER command should not be `root`* — at HIGH severity.
+2. `podman image inspect` reads the **USER of the image that was actually
+   built** and pushed. This is the authoritative check: a Containerfile that
+   says `USER bun` but was built on a base that runs as root must still be
+   caught, and only the built image can tell us that.
+
+That is why the Containerfile ends with `USER bun`. The check is a rule about
+the artefact, not about a policy file: there is no console to log into and no
+licence to buy. To widen it, change the `--severity` on the `trivy config`
+call — the pipeline needs no other change.
+
+**The one thing this pipeline does NOT check: malware.** The Trivy malware
+plugin that would have covered it has been withdrawn upstream — its repository
+is gone and it is no longer in the Trivy plugin index. Stated plainly rather
+than quietly dropped: this is a real reduction in coverage, and if the customer
+asks for malware scanning it has to come from somewhere else.
 
 **The Trivy database** is downloaded on the first run (~100 MB) and then
 cached in the `trivy-cache` volume. A first build is slow for that reason
-only.
+only. The *misconfiguration* rules — the checks bundle, which carries DS0002 —
+are downloaded separately and cached in the same volume.
 
 ## 6. Troubleshooting
 
@@ -177,14 +192,15 @@ only.
 | `Permission denied (publickey)` in the deploy stage | the SSH key is missing from the container | `podman cp ~/.ssh/id_rhai108_rsa jenkins:/var/jenkins_home/.ssh/` then `chmod 600` |
 | `Environment file ... does not exist` | the site has no env file | create it on the host — see the README, *One-time setup*. It is never sent from Jenkins |
 | `is serving database "engg_intranet" but this site is configured for "engg_intranet_uat"` | the env file names the wrong database | fix `DB_NAME` in the site's env file and re-run |
-| `twirp error internal: Failed checking cybercenter to scanner compatibility` | the Aqua console cannot reach `cybercenter5.aquasec.com` | on `.104`: `podman network reload` (a `firewall-cmd --reload` destroys podman's CNI chains) |
-| the Aqua console UI on `:8080` hangs | the same CNI-chain problem | `podman logs aqua-web`, then `podman network reload` |
+| `twirp error internal: Failed checking cybercenter to scanner compatibility` | the *other* project's Aqua console (the `aqua-demo` job) cannot reach `cybercenter5.aquasec.com` — this pipeline does not use it | on `.104`: `podman network reload` (a `firewall-cmd --reload` destroys podman's CNI chains) |
+| `unknown flag: --scanners` in a Trivy step | `trivy config` has no `--scanners` flag — it is an `image`/`fs` flag | remove `--scanners misconfig` from the `trivy config` call |
+| `BLOCKED: the runtime image runs as root` | the built image's `Config.User` is empty or `root` | add `USER <non-root>` to the runtime stage of the Containerfile, before `CMD` |
 | `Cannot connect to the Docker daemon` in a build step | `podman.socket` is not enabled, so the socket bind does not exist | on `.104`: `systemctl enable --now podman.socket`, then recreate the Jenkins container |
 | the build hangs at *Manual Approval* | that is what the gate does — but it is the **PROD** job that has the gate | approve or abort it in the Jenkins UI, on `pipeline-prod` |
 | `No UAT promotion has been recorded` | the PROD job found no record for that `PROMOTION_ID` | run the `pipeline-uat` job, or check `latest.env` under `/var/jenkins_home/promotions/intranet/` on the controller |
 | `the tag no longer points at the recorded digest` | somebody re-pushed that tag after the UAT test | re-run the UAT job, then promote the new record |
 | `UAT is no longer running the tested image` | the UAT job was re-run after the human tested it | test UAT again, then promote the newest record |
-| `Raw Scan Results directory ... has only N GB of storage` | the Aqua console's disk is full | `df -h` on `.104`, remove old tarballs, restart `aqua-web` |
+| `Raw Scan Results directory ... has only N GB of storage` | the *other* project's Aqua console disk is full — this pipeline does not use it | `df -h` on `.104`, remove old tarballs, restart `aqua-web` |
 | `SMTP connection error while sending email` in the post stage | the mail account points at `127.0.0.1`, and `.104` has no relay | set the SMTP server to `systex.com.hk`, port `25`, no credentials — see *The notification* in section 2 |
 | `501 Bad sender address syntax` | the from address is not a real address | set *Jenkins Location → System Admin E-mail address* to `tim.wong@systex.com.hk` |
 | `535 ... authentication failed` | the mail account is trying to authenticate | clear the credentials on the mail account — the MX accepts the lab without authentication |
@@ -199,10 +215,10 @@ The Jenkins container holds things that are **not** in the image:
 | the SSH key | `podman cp ~/.ssh/id_rhai108_rsa jenkins:/var/jenkins_home/.ssh/` |
 | the mcp-dr bare origin + git daemon | the mcp-dr repository's own `scripts/install-jenkins-tools.sh` |
 
-The registry (`registry_data`) and the Aqua volumes are named volumes, so
-they survive a container recreate. The Jenkins **home** (`jenkins_data`)
-survives too — jobs, build history and credentials all come back, and so do
-the promotion records, which live under
+The registry (`registry_data`) and the Trivy cache (`trivy-cache`) are named
+volumes, so they survive a container recreate. The Jenkins **home**
+(`jenkins_data`) survives too — jobs, build history and credentials all come
+back, and so do the promotion records, which live under
 `/var/jenkins_home/promotions/intranet/`.
 
 ## 8. The databases
