@@ -271,7 +271,7 @@
 //     'Code Scan (secrets + dependencies)'   BEFORE the build, on the source
 //        trivy fs --scanners secret .            the working tree, no image
 //        bun audit --json                        the lockfiles, in a
-//                                                 throwaway oven/bun:1.3-alpine
+//                                                 throwaway oven/bun:1.4-alpine
 //                                                 container with the source
 //                                                 mounted — no build needed
 //        scripts/audit_scope.py                  sorts the findings into what
@@ -351,8 +351,8 @@
 //   Every CVE that showed up was inherited from the base image, not from this
 //   code. The Debian runtime base (oven/bun:1.3-slim) carried 100
 //   HIGH/CRITICAL, 3 of them CRITICAL, all in perl-base. The runtime stage
-//   now uses oven/bun:1.3-alpine, which carries a handful of HIGH and 0
-//   CRITICAL. The exact count MOVES with the vulnerability database — the
+//   now uses oven/bun:1.4-alpine, which carries 0 HIGH and 0 CRITICAL.
+//   The exact count MOVES with the vulnerability database — the
 //   database is refreshed on every run — so no number is written down here.
 //   The report of the day is the authority: trivy-os-report.txt, and the
 //   same findings in the one-page vulnerability-report.html. The
@@ -382,10 +382,14 @@
 // ---------------------------------------------------------------------------
 // Known accepted risks (deliberate, so the pipeline stays green):
 //
-//   * The HIGH OS CVEs in the alpine base have a fix in a newer alpine
-//     release that no oven/bun tag has picked up yet. They are reported in
-//     trivy-os-report.txt but not gated; CRITICAL is the line that stops a
-//     build. Re-check when oven/bun publishes a newer alpine base.
+//   * The gate stops a build on a CRITICAL CVE and only REPORTS a HIGH one.
+//     That is a deliberate policy, not a technical limit: a HIGH in a base
+//     image is usually fixed by an upstream alpine release that oven/bun has
+//     not picked up yet, and blocking on that would stop the pipeline on
+//     something it does not control. The runtime base is oven/bun:1.4-alpine,
+//     which today carries no HIGH and no CRITICAL at all — the base was
+//     bumped off the frozen 1.3-alpine (last published 2026-05-13, 7 HIGH in
+//     its openssl and busybox) for exactly that reason.
 //
 //   * xlsx was swapped from the abandoned npm release (0.18.5 — the last
 //     version ever published to the npm registry, deprecated, and carrying
@@ -853,13 +857,13 @@ pipeline {
                     podman run --rm --name hku-audit-fs-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
                         -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/app \
-                        --entrypoint sh -w /app oven/bun:1.3-alpine \
+                        --entrypoint sh -w /app oven/bun:1.4-alpine \
                         -c 'bun audit --json' > bun-audit-root.json 2> bun-audit-root.log || true
 
                     podman run --rm --name hku-audit-fs-srv-${BUILD_NUMBER} \
                         --network host --security-opt label=disable \
                         -v ${JENKINS_VOLUME_PATH}/workspace/${JOB_NAME}/app:/app \
-                        --entrypoint sh -w /app/server oven/bun:1.3-alpine \
+                        --entrypoint sh -w /app/server oven/bun:1.4-alpine \
                         -c 'bun audit --json' > bun-audit-server.json 2> bun-audit-server.log || true
 
                     echo "### bun audit — frontend (app/bun.lock)"
@@ -1282,9 +1286,8 @@ pipeline {
                     # ------------------------------------------------------------------
                     # OS packages of the image we actually ship.
                     # HARD GATE on CRITICAL. The runtime base is
-                    # oven/bun:1.3-alpine, which currently carries 0 CRITICAL
-                    # and a handful of HIGH (all with a fix available in a
-                    # newer alpine release). Gating on HIGH too would block
+                    # oven/bun:1.4-alpine, which currently carries neither
+                    # CRITICAL nor HIGH. Gating on HIGH too would block
                     # the build on a base-image update we do not control, so
                     # HIGH is reported and CRITICAL is the line that stops a
                     # build. The count moves with the vulnerability database,
