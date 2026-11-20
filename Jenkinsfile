@@ -1174,6 +1174,13 @@ pipeline {
                     cat trivy-report.txt
                     echo "trivy scope exit code: ${TRIVY_SCOPE_RC}"
 
+                    # This text report is the GATE's evidence: it shows what is
+                    # at or above the threshold. The full list, at every
+                    # severity, is in the one-page report below — say so, so
+                    # the two artefacts do not look like they disagree.
+                    echo "" >> trivy-report.txt
+                    echo "The full list, at every severity, is in vulnerability-report.html" >> trivy-report.txt
+
                     # ------------------------------------------------------------------
                     # OS packages of the image we actually ship.
                     # HARD GATE on CRITICAL. The runtime base is
@@ -1203,6 +1210,12 @@ pipeline {
                     cat trivy-os-report.txt
                     echo "trivy (OS packages) exit code: ${TRIVY_OS_RC}"
 
+                    # Same pointer as above: this text report is the gate's
+                    # evidence and shows the CRITICAL and the HIGH findings.
+                    # The one-page report lists every severity.
+                    echo "" >> trivy-os-report.txt
+                    echo "The full list, at every severity, is in vulnerability-report.html" >> trivy-os-report.txt
+
                     # The HIGH findings are not gated, but they are assessed, so
                     # they belong in the artifact that goes to the client.
                     podman run --rm --name hku-trivy-os-high-${BUILD_NUMBER} \
@@ -1223,6 +1236,12 @@ pipeline {
                     # form, so the report can list the findings with their
                     # severity, their fixed version and their links.
                     #
+                    # NO severity filter here, on purpose: the report shows
+                    # EVERY level — LOW and MEDIUM included — and points at
+                    # the HIGH and CRITICAL ones instead of hiding the rest.
+                    # The gates above are unchanged; they still stop the
+                    # build on CRITICAL alone.
+                    #
                     # The CRITICAL count below is checked as well, so the
                     # report and the gate cannot disagree: a CRITICAL in the
                     # JSON is a CRITICAL in the image, whatever the table run
@@ -1236,7 +1255,6 @@ pipeline {
                         ${TRIVY_IMAGE} \
                         image --scanners vuln \
                             --pkg-types os \
-                            --severity HIGH,CRITICAL \
                             --format json \
                             ${FULL_IMAGE} > trivy-os-report.json 2> trivy-os-json.err || true
 

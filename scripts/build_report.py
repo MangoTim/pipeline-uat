@@ -210,6 +210,11 @@ th, td { border: 1px solid #dcdcdc; padding: 6px 9px; text-align: left;
 th { background: #f0f0f0; font-weight: 600; }
 td.num, th.num { text-align: right; }
 tr:nth-child(even) td { background: #fbfbfb; }
+/* The two levels that matter are tinted, so the eye lands on them first.
+   These come AFTER the nth-child rule on purpose — same specificity, so
+   the later rule wins. */
+tr.sev-critical td { background: #fdecea; }
+tr.sev-high td { background: #fff4ea; }
 .meta td:first-child { color: #666; width: 190px; }
 .sev { color: #fff; font-weight: 600; text-align: center;
        border-radius: 3px; padding: 1px 7px; white-space: nowrap; }
@@ -251,16 +256,42 @@ def links_cell(row, limit=3):
     return " ".join(parts)
 
 
-def render_table(headers, rows):
-    """A table, or the one-line "nothing found" when there are no rows."""
+def render_table(headers, rows, row_classes=None):
+    """A table, or the one-line "nothing found" when there are no rows.
+
+    `row_classes` is parallel to `rows` — the CSS class of each row, so the
+    HIGH and CRITICAL findings can be tinted.
+    """
     if not rows:
         return '<div class="empty">Nothing found — no findings of this kind.</div>'
     head = "".join("<th>%s</th>" % esc(header) for header in headers)
     body = []
-    for row in rows:
-        body.append("<tr>" + "".join("<td>%s</td>" % cell for cell in row) + "</tr>")
+    for index, row in enumerate(rows):
+        css = ""
+        if row_classes:
+            css = ' class="%s"' % esc(row_classes[index]) if row_classes[index] else ""
+        body.append("<tr%s>" % css
+                    + "".join("<td>%s</td>" % cell for cell in row) + "</tr>")
     return "<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (
         head, "".join(body))
+
+
+def row_class(severity):
+    """The CSS class of a row, so the two levels that matter stand out."""
+    text = normalise_severity(severity)
+    if text == "CRITICAL":
+        return "sev-critical"
+    if text == "HIGH":
+        return "sev-high"
+    return ""
+
+
+def gate_badge(blocks):
+    """What the pipeline did with this finding: it stopped the build, or it
+    was reported and the build carried on."""
+    if blocks:
+        return '<span class="badge gate">blocks</span>'
+    return '<span class="badge rep">reported</span>'
 
 
 def counts_of(rows):
@@ -270,17 +301,24 @@ def counts_of(rows):
     return counts
 
 
+# The severity buckets the summary counts. "OTHER" is everything the four
+# named buckets do not cover — UNKNOWN, and anything a scanner may invent.
+SUMMARY_LEVELS = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+SUMMARY_OTHER = "OTHER"
+
+
 def summary_rows(sections):
     """One line per scan: how many of each severity, and the verdict."""
     for section in sections:
         counts = counts_of(section["rows"])
+        buckets = sum(counts.get(level, 0) for level in SUMMARY_LEVELS)
+        other = len(section["rows"]) - buckets
         cells = "".join('<td class="num count">%d</td>' % counts.get(level, 0)
-                        for level in ("CRITICAL", "HIGH", "MEDIUM", "LOW"))
-        total = sum(counts.get(level, 0)
-                    for level in ("CRITICAL", "HIGH", "MEDIUM", "LOW"))
+                        for level in SUMMARY_LEVELS)
+        cells += '<td class="num count">%d</td>' % other
         yield ("<td><b>%s</b></td>%s<td class=\"num count\">%d</td>"
                "<td><span class=\"badge %s\">%s</span></td>"
-               % (esc(section["name"]), cells, total,
+               % (esc(section["name"]), cells, len(section["rows"]),
                   section["verdict_class"], esc(section["verdict"])))
 
 
@@ -316,12 +354,17 @@ def build_page(args, sections):
 build: the source tree and the lockfiles (the code scan), and the images that
 were built and pushed (the image scan). The image was scanned before it was
 deployed, and it is the same image — the same digest — that UAT and production
-run.</p>
+run.<br><br>
+Every severity is listed, LOW and MEDIUM included, because a reader is entitled
+to the whole list. The <b>HIGH</b> and <b>CRITICAL</b> findings are the ones
+that matter, so their rows are tinted and their <b>Gate</b> column says whether
+the finding stopped the build or was only reported.</p>
 <table class="meta">%s</table>
 
 <h2>Summary</h2>
 <table><thead><tr><th>Scan</th><th class="num">CRITICAL</th><th class="num">HIGH</th>
-<th class="num">MEDIUM</th><th class="num">LOW</th><th class="num">Total</th>
+<th class="num">MEDIUM</th><th class="num">LOW</th><th class="num">OTHER</th>
+<th class="num">Total</th>
 <th>Verdict</th></tr></thead><tbody>%s</tbody></table>
 
 %s
@@ -433,10 +476,10 @@ def main():
           severity_cell(row["severity"]),
           esc(row["installed"]),
           esc(row["fixed"]) or "—",
-          '<span class="badge gate">blocks</span>' if row["severity"] == "CRITICAL"
-          else '<span class="badge rep">reported</span>',
+          gate_badge(row["severity"] == "CRITICAL"),
           esc(row["title"]),
-          links_cell(row)] for row in os_rows])
+          links_cell(row)] for row in os_rows],
+        row_classes=[row_class(row["severity"]) for row in os_rows])
     sections.append({
         "name": "Image — OS packages",
         "rows": os_rows,
@@ -447,15 +490,15 @@ def main():
         "verdict_class": "block" if os_critical else ("rep" if os_high else "clean"),
         "html": """<h2>1. Image — OS packages of the runtime base</h2>
 <p class="note">The runtime image is what the customer runs. Its OS packages
-come from the base image and are inherited from it, not from this code. A
-CRITICAL finding here stops the build; a HIGH finding is reported and
-accepted, with the reason recorded in the pipeline's own notes.</p>
+come from the base image and are inherited from it, not from this code. Every
+severity is listed. A CRITICAL finding here stops the build; a HIGH finding is
+reported and accepted, with the reason recorded in the pipeline's own notes.</p>
 %s""" % os_rows_html,
     })
 
     lib_rows_html = render_table(
         ["Package", "Vulnerability", "Severity", "Installed", "Fixed", "Ships?",
-         "Reached via", "Title", "Links"],
+         "Gate", "Reached via", "Title", "Links"],
         [[esc(row["package"]),
           '<a href="%s">%s</a>' % (esc(row["url"]), esc(row["id"]))
           if row.get("url") else esc(row["id"]),
@@ -464,9 +507,12 @@ accepted, with the reason recorded in the pipeline's own notes.</p>
           esc(row["fixed"]) or "—",
           '<span class="badge ships">ships</span>' if row["scope"] == "ships"
           else '<span class="badge tool">build tool</span>',
+          gate_badge(row["scope"] == "ships"
+                     and severity_rank(row["severity"]) >= threshold),
           esc(row["via"]),
           esc(row["title"]),
-          links_cell(row)] for row in image_libs])
+          links_cell(row)] for row in image_libs],
+        row_classes=[row_class(row["severity"]) for row in image_libs])
     lib_shipped_bad = [row for row in image_libs
                        if row["scope"] == "ships"
                        and severity_rank(row["severity"]) >= threshold]
@@ -479,10 +525,10 @@ accepted, with the reason recorded in the pipeline's own notes.</p>
         "verdict_class": "block" if lib_shipped_bad else "clean",
         "html": """<h2>2. Image — library dependencies</h2>
 <p class="note">The builder stage still holds the whole frontend dependency
-tree, so this is where the frontend libraries are scanned. A finding on a
-package that <b>ships</b> is a real finding and stops the build; a finding on
-a build tool is reported with the path that reaches it, and does not — it
-never reaches the customer.</p>
+tree, so this is where the frontend libraries are scanned. Every severity is
+listed. A finding on a package that <b>ships</b> is a real finding and stops
+the build; a finding on a build tool is reported with the path that reaches
+it, and does not — it never reaches the customer.</p>
 %s""" % lib_rows_html,
     })
 
@@ -528,17 +574,20 @@ caught it.</p>
     deps.sort(key=lambda row: (-severity_rank(row["severity"]), str(row["package"])))
     deps_html = render_table(
         ["Package", "Advisory", "Severity", "Vulnerable versions", "Ships?",
-         "Reached via", "Title", "Link"],
+         "Gate", "Reached via", "Title", "Link"],
         [[esc(row["package"]),
           esc(row["id"]),
           severity_cell(row["severity"]),
           esc(row["vulnerable"]),
           '<span class="badge ships">ships</span>' if row["ships"]
           else '<span class="badge tool">build tool</span>',
+          gate_badge(row["ships"]
+                     and severity_rank(row["severity"]) >= threshold),
           esc(row["via"]),
           esc(row["title"]),
           '<a href="%s">advisory</a>' % esc(row["url"]) if row.get("url") else "—"]
-         for row in deps])
+         for row in deps],
+        row_classes=[row_class(row["severity"]) for row in deps])
     deps_bad = [row for row in deps
                 if row["ships"] and severity_rank(row["severity"]) >= threshold]
     sections.append({
@@ -549,12 +598,12 @@ caught it.</p>
         "verdict_class": "block" if deps_bad else "clean",
         "html": """<h2>5. Code scan — dependency advisories</h2>
 <p class="note">Straight from the npm advisory registry, through the two
-lockfiles. The frontend ships only its production closure — the compiled
-bundle is delivered, the frontend node_modules are not in the runtime image.
-The server ships its whole installed tree, because the runtime image copies
-<code>server/</code> out of the builder. An advisory on a package that
-<b>ships</b> stops the build; an advisory on a build tool is reported with the
-path that reaches it, and does not.</p>
+lockfiles. Every severity is listed. The frontend ships only its production
+closure — the compiled bundle is delivered, the frontend node_modules are not
+in the runtime image. The server ships its whole installed tree, because the
+runtime image copies <code>server/</code> out of the builder. An advisory on a
+package that <b>ships</b> stops the build; an advisory on a build tool is
+reported with the path that reaches it, and does not.</p>
 %s""" % deps_html,
     })
 

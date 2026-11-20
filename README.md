@@ -208,6 +208,14 @@ lockfiles by the same rule the gates use — the path that reaches the package
 and the links. The summary table at the top says how many of each severity
 each scan found, and the verdict.
 
+**Every severity is listed**, LOW and MEDIUM included — a reader is entitled
+to the whole list, and hiding the lower findings would be its own kind of
+misleading. The **HIGH and CRITICAL rows are tinted**, because those are the
+ones that matter, and every vulnerability table carries a **Gate** column
+saying whether the finding stopped the build or was only reported. The OS
+scan behind the report is deliberately *unfiltered*; the gates are not — they
+still stop the build on a CRITICAL alone.
+
 Three things are deliberate:
 
 - **Trivy's own HTML template is not enough.** `/contrib/html.tpl` renders one
