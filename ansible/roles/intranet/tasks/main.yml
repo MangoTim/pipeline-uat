@@ -190,19 +190,23 @@
 
 # The application's own readiness answer. It reports WHICH database it is
 # connected to and whether that database answers — a live probe, not a static
-# flag. There is no separate /health/ready endpoint: the SPA catch-all would
-# answer that path with the index page, so the check has to ask the API.
+# flag.
+#
+# /health/ready, not /api/db/connection: the latter is an ADMIN page and
+# answers 401 to an anonymous probe. /health/ready is anonymous, and answers
+# 503 (not 401) when the database is unreachable — so 503 is accepted here
+# and the until-loop below waits for the healthy 200.
 - name: Check readiness
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ intranet_port }}/api/db/connection"
-    status_code: 200
+    url: "http://127.0.0.1:{{ intranet_port }}/health/ready"
+    status_code: [200, 503]
     return_content: true
   register: intranet_ready
   retries: 12
   delay: 5
   until:
     - intranet_ready.status | default(0) == 200
-    - (intranet_ready.json | default({})).get('isReachable', false) | bool
+    - (intranet_ready.json | default({})).get('db') == 'ok'
 
 # The readiness answer reports the database the site is ACTUALLY connected to,
 # so this is what proves the UAT site is a separate data set and not a second
@@ -210,13 +214,13 @@
 - name: Assert the site is talking to the expected database
   ansible.builtin.assert:
     that:
-      - (intranet_ready.json | default({})).get('databaseName') == intranet_db_name
-      - (intranet_ready.json | default({})).get('isReachable', false) | bool
+      - (intranet_ready.json | default({})).get('database') == intranet_db_name
+      - (intranet_ready.json | default({})).get('db') == 'ok'
     fail_msg: >-
       {{ inventory_hostname }} is serving database
-      "{{ (intranet_ready.json | default({})).get('databaseName', 'unknown') }}"
+      "{{ (intranet_ready.json | default({})).get('database', 'unknown') }}"
       and reports it as
-      {{ 'reachable' if ((intranet_ready.json | default({})).get('isReachable', false) | bool) else 'NOT reachable' }},
+      {{ 'reachable' if ((intranet_ready.json | default({})).get('db') == 'ok') else 'NOT reachable' }},
       but this site is configured for "{{ intranet_db_name }}". Refusing to
       report a successful deployment.
 

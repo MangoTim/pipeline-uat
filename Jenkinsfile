@@ -1530,13 +1530,19 @@ pipeline {
                     # is on, and whether that database answers. This is the
                     # same endpoint the deployment gate uses on the real
                     # sites, so the CI proves the one thing the sites check.
-                    READY=$(curl -fsS "http://127.0.0.1:${VERIFY_PORT}/api/db/connection")
+                    #
+                    # /health/ready, not /api/db/connection: the latter is an
+                    # ADMIN page now and answers 401 to an anonymous probe.
+                    # /health/ready is anonymous and answers 503 (not 401)
+                    # when the database is unreachable, so the failure can be
+                    # read instead of guessed — hence curl without -f.
+                    READY=$(curl -sS "http://127.0.0.1:${VERIFY_PORT}/health/ready")
                     echo "${READY}"
-                    echo "${READY}" | grep -q '"isReachable":true' \
+                    echo "${READY}" | grep -q '"db":"ok"' \
                         || { echo "BLOCKED: the application did not reach its database"; \
                              podman logs hku-intranet-verify-${BUILD_NUMBER} || true; \
                              exit 1; }
-                    echo "${READY}" | grep -q '"databaseName":"engg_intranet_verify"' \
+                    echo "${READY}" | grep -q '"database":"engg_intranet_verify"' \
                         || { echo "BLOCKED: the application is on the wrong database"; \
                              podman logs hku-intranet-verify-${BUILD_NUMBER} || true; \
                              exit 1; }
@@ -1595,16 +1601,21 @@ pipeline {
                     # and whether that database answers. That is what proves
                     # UAT is a separate data set and not a second view of
                     # production.
-                    READY=$(curl -fsS "http://${UAT_HOST}:${UAT_PORT}/api/db/connection")
+                    #
+                    # /health/ready is the anonymous readiness endpoint;
+                    # /api/db/connection is an ADMIN page now and answers 401
+                    # to an anonymous probe. curl without -f so a degraded
+                    # answer (503) can still be read.
+                    READY=$(curl -sS "http://${UAT_HOST}:${UAT_PORT}/health/ready")
                     echo "${READY}"
                     # The pattern is built by concatenation, not with backslash
                     # escapes: Groovy eats the backslash in a triple-quoted
                     # block, and dash then strips the quotes, so grep would be
-                    # handed databaseName:engg_intranet_uat, which never matches
+                    # handed database:engg_intranet_uat, which never matches
                     # the quoted key in the JSON.
-                    echo "${READY}" | grep -q '"databaseName":"'"${UAT_DB}"'"' \
+                    echo "${READY}" | grep -q '"database":"'"${UAT_DB}"'"' \
                         || { echo "BLOCKED: UAT is serving the wrong database, expected ${UAT_DB}"; exit 1; }
-                    echo "${READY}" | grep -q '"isReachable":true' \
+                    echo "${READY}" | grep -q '"db":"ok"' \
                         || { echo "BLOCKED: UAT cannot reach its database ${UAT_DB}"; exit 1; }
 
                     echo "UAT deployed: http://${UAT_HOST}:${UAT_PORT}/  (database ${UAT_DB})"

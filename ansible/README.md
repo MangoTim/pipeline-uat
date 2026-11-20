@@ -255,7 +255,7 @@ carries the host it must reach.
    that is a no-op on an already-active unit, so the container would keep
    running the previous image.)
 5. Waits for the port, then checks `/health` (liveness) and
-   `/api/db/connection` (readiness — it names the database and reports
+   `/health/ready` (readiness — it names the database and reports
    whether it answers).
 6. Asserts the running container is the promoted image, and that the site is
    talking to the database it is supposed to talk to.
@@ -266,15 +266,18 @@ carries the host it must reach.
 
 ```bash
 curl -s http://192.168.147.104:8097/health              # UAT
-curl -s http://192.168.147.104:8097/api/db/connection   # UAT  -> "databaseName":"engg_intranet_uat"
-curl -s http://192.168.147.105:8093/api/db/connection   # PROD -> "databaseName":"engg_intranet"
+curl -s http://192.168.147.104:8097/health/ready         # UAT  -> {"status":"ok","db":"ok","database":"engg_intranet_uat"}
+curl -s http://192.168.147.105:8093/health/ready         # PROD -> {"status":"ok","db":"ok","database":"engg_intranet"}
 
 ssh uat@192.168.147.104 'systemctl --user status hku-intranet-uat.service; podman images'
 ssh rhai@192.168.147.105 'systemctl --user status hku-intranet.service; podman images'
 ```
 
-The database name in `/api/db/connection` is the quickest proof that UAT and
+The database name in `/health/ready` is the quickest proof that UAT and
 PROD are different environments and not the same data wearing two hats.
 
-There is **no** `/health/ready` endpoint: the SPA catch-all answers that path
-with the index page, so the check has to ask the API.
+`/health/ready` is **anonymous**: it answers 200 with the database name when
+the database answers, and 503 with the same name plus the error when it does
+not. The other database endpoint, `/api/db/connection`, is an **admin** page
+— it names the same database but answers `401` to an anonymous probe, so it
+belongs to the browser, not to a script.

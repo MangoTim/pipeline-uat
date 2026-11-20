@@ -93,14 +93,18 @@ DEBUG SMTP: message successfully delivered to mail server
 
 ```bash
 curl -s http://192.168.147.104:8097/health              # UAT  -> {"status":"ok","db":"ok"}
-curl -s http://192.168.147.104:8097/api/db/connection   # UAT  -> "databaseName":"engg_intranet_uat"
-curl -s http://192.168.147.105:8093/api/db/connection   # PROD -> "databaseName":"engg_intranet"
+curl -s http://192.168.147.104:8097/health/ready         # UAT  -> {"status":"ok","db":"ok","database":"engg_intranet_uat"}
+curl -s http://192.168.147.105:8093/health/ready         # PROD -> {"status":"ok","db":"ok","database":"engg_intranet"}
 ```
 
-The database name in `/api/db/connection` is the quickest proof that UAT and
-PROD are different environments and not the same data wearing two hats. There
-is **no** `/health/ready` endpoint: the SPA catch-all answers that path with
-the index page, so the check has to ask the API — which is what the role does.
+The database name in `/health/ready` is the quickest proof that UAT and
+PROD are different environments and not the same data wearing two hats.
+
+`/health/ready` is **anonymous** — it answers 200 with the database name when
+the database answers, and 503 with the same name plus the error when it does
+not, which is exactly what the deployment gate reads. `/api/db/connection`
+also names the database but is an **admin** page: it answers `401` to an
+anonymous probe, so it is for the browser and not for a script.
 
 On the hosts themselves:
 

@@ -413,16 +413,20 @@ The SAME tag and the SAME digest that passed the UAT check will be deployed to p
 
                     curl -fsS "http://${PROD_HOST}:${PROD_PORT}/health"
                     echo ""
-                    READY=$(curl -fsS "http://${PROD_HOST}:${PROD_PORT}/api/db/connection")
+                    # /health/ready is the anonymous readiness endpoint;
+                    # /api/db/connection is an ADMIN page now and answers 401
+                    # to an anonymous probe. curl without -f so a degraded
+                    # answer (503) can still be read.
+                    READY=$(curl -sS "http://${PROD_HOST}:${PROD_PORT}/health/ready")
                     echo "${READY}"
                     # The pattern is built by concatenation, not with backslash
                     # escapes: Groovy eats the backslash in a triple-quoted
                     # block, and dash then strips the quotes, so grep would be
-                    # handed databaseName:engg_intranet, which never matches
+                    # handed database:engg_intranet, which never matches
                     # the quoted key in the JSON.
-                    echo "${READY}" | grep -q '"databaseName":"'"${PROD_DB}"'"' \
+                    echo "${READY}" | grep -q '"database":"'"${PROD_DB}"'"' \
                         || { echo "BLOCKED: PROD is serving the wrong database, expected ${PROD_DB}"; exit 1; }
-                    echo "${READY}" | grep -q '"isReachable":true' \
+                    echo "${READY}" | grep -q '"db":"ok"' \
                         || { echo "BLOCKED: PROD cannot reach its database ${PROD_DB}"; exit 1; }
 
                     echo "PROD deployed: http://${PROD_HOST}:${PROD_PORT}/  (database ${PROD_DB})"
